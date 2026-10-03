@@ -17,9 +17,20 @@
         android:text="開USB共享" />
 
     <TextView
-        android:id="@+id/status"
+        android:id="@+id/usbStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:clickable="true"
+        android:focusable="true"
+        android:padding="16dp"
+        android:textSize="14sp" />
+
+    <TextView
+        android:id="@+id/wifiStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:clickable="true"
+        android:focusable="true"
         android:padding="16dp"
         android:textSize="14sp" />
 </LinearLayout>

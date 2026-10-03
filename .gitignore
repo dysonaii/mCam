@@ -5,6 +5,8 @@ local.properties
 *.log
 pc/shots/
 pc/rec/
+pc/mCam.json
 *.dll
 __pycache__/
 *.pyc
+*.json

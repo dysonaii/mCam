@@ -22,8 +22,31 @@ BASE = Path(__file__).parent
 SHOTS = BASE / "shots"
 REC = BASE / "rec"
 ICON = BASE / "mCam.ico"
+CFG = BASE / "mCam.json"
 SHOTS.mkdir(exist_ok=True)
 REC.mkdir(exist_ok=True)
+
+
+def load_cfg() -> dict:
+    # ponytail: 每個 mode 各記一組 url，切換不丟；舊檔只有 url 就當該 mode 的，壞檔回預設
+    try:
+        d = json.loads(CFG.read_text(encoding="utf-8"))
+        m = d.get("mode", "USB共享")
+        m = m if m in MODES else "USB共享"
+        urls = dict(MODES)
+        urls.update({k: v for k, v in (d.get("urls") or {}).items() if k in MODES and v})
+        if d.get("url"):
+            urls[m] = d["url"]
+        return {"mode": m, "urls": urls}
+    except Exception:
+        return {"mode": "USB共享", "urls": dict(MODES)}
+
+
+def save_cfg(mode: str, urls: dict) -> None:
+    try:
+        CFG.write_text(json.dumps({"mode": mode, "urls": urls}, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def open_cap(spec: str) -> cv2.VideoCapture:
@@ -73,7 +96,7 @@ def server_fps(url: str) -> float:
 
 
 def make_writer(path: Path, w: int, h: int, fps: float) -> cv2.VideoWriter:
-    # ponytail: 沒 DLL 時 avc1 會假開啟(isOpened 照 True 卻寫廢檔)，有 DLL 才試它
+    # ponytail: 沒 DLL 時 avc1 會假開啟(isOpened 照 True 卻寫廢檔)，有 DLL 才試它；檔名寫死，ffmpeg 只認 2.5.0(實測 2.6.0 改名會崩)
     dll = "openh264-2.5.0-win64.dll"
     has_h264 = (Path(sys.executable).parent / dll).exists() or (Path(cv2.__file__).parent / dll).exists()
     tags = ("avc1", "mp4v") if has_h264 else ("mp4v",)
@@ -297,11 +320,14 @@ def gallery() -> None:
 
 
 def main() -> None:
+    cfg = load_cfg()
+    urls = cfg["urls"]
+    cur_mode = cfg["mode"]
     layout = [
         [sg.Image(key="-IMG-")],
-        [sg.Combo(list(MODES), default_value="USB共享", key="-MODE-", readonly=True,
+        [sg.Combo(list(MODES), default_value=cur_mode, key="-MODE-", readonly=True,
                   enable_events=True, size=(11, 1)),
-         sg.Input(MODES["USB共享"], key="-URL-", size=(40, 1))],
+         sg.Input(urls[cur_mode], key="-URL-", size=(40, 1))],
         [sg.Button("連線"), sg.Button("中斷"),
          sg.Button("截圖"), sg.Button("●錄影", key="-REC-"),
          sg.Button("圖庫")],
@@ -320,8 +346,11 @@ def main() -> None:
         if event in (sg.WIN_CLOSED, "Exit"):
             break
         if event == "-MODE-":
-            # ponytail: Combo 只填預設值
-            window["-URL-"].update(MODES[values["-MODE-"]])
+            # ponytail: 離開前先把舊 mode 的手填值存下，切過去帶該 mode 上次的值
+            urls[cur_mode] = window["-URL-"].get()
+            cur_mode = values["-MODE-"]
+            window["-URL-"].update(urls[cur_mode])
+            save_cfg(cur_mode, urls)
         if event == "連線":
             if cap is not None:
                 cap.release()
@@ -340,6 +369,8 @@ def main() -> None:
             cap = open_cap(spec)
             fails = 0
             src_fps = 20.0 if spec.strip().isdigit() else server_fps(spec)
+            urls[values["-MODE-"]] = spec
+            save_cfg(values["-MODE-"], urls)
             window["-STATUS-"].update("連線中..." if cap.isOpened() else "連不上：webcam被佔用？換 0/1 試試")
         elif event == "中斷":
             if cap is not None:
@@ -402,6 +433,11 @@ def main() -> None:
         writer.release()
     if cap is not None:
         cap.release()
+    try:
+        urls[cur_mode] = window["-URL-"].get()
+        save_cfg(window["-MODE-"].get(), urls)
+    except Exception:
+        pass
     window.close()
 
 

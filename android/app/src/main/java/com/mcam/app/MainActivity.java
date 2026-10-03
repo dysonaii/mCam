@@ -1,6 +1,8 @@
 package com.mcam.app;
 
 import android.Manifest;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.provider.Settings;
@@ -12,6 +14,7 @@ import android.os.Bundle;
 import android.util.Size;
 import android.view.WindowManager;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
 import androidx.camera.core.CameraSelector;
@@ -36,7 +39,10 @@ public class MainActivity extends ComponentActivity {
     private MjpegServer server;
     private ExecutorService cameraIo;
     private PreviewView previewView;
-    private TextView status;
+    private TextView usbStatus;
+    private TextView wifiStatus;
+    private String usbUrl;
+    private String wifiUrl;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -44,7 +50,10 @@ public class MainActivity extends ComponentActivity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setContentView(R.layout.activity_main);
         previewView = findViewById(R.id.preview);
-        status = findViewById(R.id.status);
+        usbStatus = findViewById(R.id.usbStatus);
+        wifiStatus = findViewById(R.id.wifiStatus);
+        usbStatus.setOnClickListener(v -> copyUrl(usbUrl));
+        wifiStatus.setOnClickListener(v -> copyUrl(wifiUrl));
         findViewById(R.id.tetherBtn).setOnClickListener(v -> openTetherSettings());
 
         cameraIo = Executors.newSingleThreadExecutor();
@@ -52,7 +61,7 @@ public class MainActivity extends ComponentActivity {
         try {
             server.start();
         } catch (Exception e) {
-            status.setText("port 8080 開不起來: " + e.getMessage());
+            wifiStatus.setText("port 8080 開不起來: " + e.getMessage());
             return;
         }
         refreshStatus();
@@ -67,7 +76,7 @@ public class MainActivity extends ComponentActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (status != null) refreshStatus();  // ponytail: 從系統設定頁回來順手更新，不用重開 App
+        if (wifiStatus != null) refreshStatus();  // ponytail: 從系統設定頁回來順手更新，不用重開 App
     }
 
     // ponytail: 第三方 App 拿不到 TETHER_PRIVILEGED，直接開關系統不給；
@@ -87,10 +96,20 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void refreshStatus() {
-        boolean on = usbTetherOn();
-        String s = "USB共享 : http://192.168.42.129:8080/video\n"
-                + "本機IP: http://" + localIp() + ":8080/video";
-        status.setText(s);
+        usbUrl = "http://192.168.42.129:8080/video";
+        usbStatus.setText("USB: " + usbUrl);
+        String w = wifiIp();
+        wifiUrl = w != null ? "http://" + w + ":8080/video" : null;
+        wifiStatus.setText(wifiUrl != null ? "WiFi: " + wifiUrl
+                : "WiFi: 行動網路不能直連");
+    }
+
+    // ponytail: 點一下複製整串 url，HINT 時無 url 就不動作
+    private void copyUrl(String url) {
+        if (url == null) return;
+        ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE))
+                .setPrimaryClip(ClipData.newPlainText("url", url));
+        Toast.makeText(this, "已複製 " + url, Toast.LENGTH_SHORT).show();
     }
 
     // ponytail: 讀不到系統 tethering state，就看 rndis/usb 網卡有沒有拿到 IPv4，夠判斷開關
@@ -120,7 +139,7 @@ public class MainActivity extends ComponentActivity {
         if (code == REQ_CAMERA && r.length > 0 && r[0] == PackageManager.PERMISSION_GRANTED) {
             startCamera();
         } else {
-            status.setText("沒相機權限就沒畫面");
+            wifiStatus.setText("沒相機權限就沒畫面");
         }
     }
 
@@ -139,7 +158,7 @@ public class MainActivity extends ComponentActivity {
                 provider.unbindAll();
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis);
             } catch (Exception e) {
-                status.setText("相機起不來: " + e.getMessage());
+                wifiStatus.setText("相機起不來: " + e.getMessage());
             }
         }, ContextCompat.getMainExecutor(this));
     }
@@ -238,21 +257,27 @@ public class MainActivity extends ComponentActivity {
         return nv21;
     }
 
-    // ponytail: 只列第一個非迴路 IPv4，網段怪時(172.24.x)照抄即可
-    static String localIp() {
+    // ponytail: 只認 wlan/wifi，沒有就不顯示；行動 rmnet 是電信 NAT，PC 連不到，顯示反而誤導
+    static String wifiIp() {
         try {
-            for (java.util.Enumeration<java.net.NetworkInterface> e =
-                 java.net.NetworkInterface.getNetworkInterfaces(); e.hasMoreElements(); ) {
+            java.util.Enumeration<java.net.NetworkInterface> nis =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (nis.hasMoreElements()) {
+                java.net.NetworkInterface ni = nis.nextElement();
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                String n = ni.getName().toLowerCase();
+                if (!(n.contains("wlan") || n.contains("wifi") || n.contains("wlp"))) continue;
                 for (java.util.Enumeration<java.net.InetAddress> a =
-                     e.nextElement().getInetAddresses(); a.hasMoreElements(); ) {
+                     ni.getInetAddresses(); a.hasMoreElements(); ) {
                     java.net.InetAddress addr = a.nextElement();
-                    if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address)
-                        return addr.getHostAddress();
+                    if (addr.isLoopbackAddress() || !(addr instanceof java.net.Inet4Address))
+                        continue;
+                    return addr.getHostAddress();
                 }
             }
         } catch (Exception ignored) {
         }
-        return "?";
+        return null;
     }
 
     @Override
