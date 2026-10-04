@@ -1,9 +1,11 @@
 package com.mcam.app;
 
 import android.Manifest;
+import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.provider.Settings;
 import android.graphics.ImageFormat;
@@ -13,6 +15,10 @@ import android.media.Image;
 import android.os.Bundle;
 import android.util.Size;
 import android.view.WindowManager;
+import android.view.View;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -39,10 +45,23 @@ public class MainActivity extends ComponentActivity {
     private MjpegServer server;
     private ExecutorService cameraIo;
     private PreviewView previewView;
+    private ImageView recvView;
+    private TextView hint;
+    private volatile Thread recvThread;
     private TextView usbStatus;
     private TextView wifiStatus;
+    private Button previewBtn;
+    private Button wifiModeBtn;
+    private SharedPreferences prefs;
+    private boolean wifiRecv = false;
+    private ProcessCameraProvider provider;
+    private Preview previewUseCase;
+    private ImageAnalysis analysisUseCase;
+    private boolean previewOn = true;
     private String usbUrl;
     private String wifiUrl;
+    private String wifiRecvUrl;
+    private String wifiSendUrl;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -50,21 +69,28 @@ public class MainActivity extends ComponentActivity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setContentView(R.layout.activity_main);
         previewView = findViewById(R.id.preview);
+        recvView = findViewById(R.id.recvView);
+        hint = findViewById(R.id.previewHint);
         usbStatus = findViewById(R.id.usbStatus);
         wifiStatus = findViewById(R.id.wifiStatus);
+        prefs = getSharedPreferences("mCam", MODE_PRIVATE);
+        wifiRecv = prefs.getBoolean("wifi_recv", false);
+        wifiRecvUrl = prefs.getString("wifi_recv_url", null);
+        wifiSendUrl = prefs.getString("wifi_send_url", null);
         usbStatus.setOnClickListener(v -> copyUrl(usbUrl));
-        wifiStatus.setOnClickListener(v -> copyUrl(wifiUrl));
+        wifiStatus.setOnClickListener(v -> {
+            if (wifiRecv) editRecvUrl();
+            else copyUrl(wifiUrl);
+        });
+        wifiModeBtn = findViewById(R.id.wifiModeBtn);
+        wifiModeBtn.setOnClickListener(v -> toggleWifiMode());
+        previewBtn = findViewById(R.id.previewBtn);
+        previewBtn.setOnClickListener(v -> togglePreview());
         findViewById(R.id.tetherBtn).setOnClickListener(v -> openTetherSettings());
 
         cameraIo = Executors.newSingleThreadExecutor();
-        server = new MjpegServer(PORT);
-        try {
-            server.start();
-        } catch (Exception e) {
-            wifiStatus.setText("port 8080 開不起來: " + e.getMessage());
-            return;
-        }
         refreshStatus();
+        applyMode();  // ponytail: 傳送才開 server；接收不開，不留凍結幀害 PC 的 cap.read 卡死
 
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera();
@@ -97,11 +123,219 @@ public class MainActivity extends ComponentActivity {
 
     private void refreshStatus() {
         usbUrl = "http://192.168.42.129:8080/video";
-        usbStatus.setText("USB: " + usbUrl);
+        usbStatus.setText("USB:"+usbUrl);
+        wifiModeBtn.setText(wifiRecv ? "WiFi 接收端" : "WiFi 傳送端");
+        if (wifiRecv) {
+            wifiStatus.setText(wifiRecvUrl != null ? "WiFi:"+wifiRecvUrl : "WiFi:點此輸入對方 URL");
+            return;
+        }
         String w = wifiIp();
-        wifiUrl = w != null ? "http://" + w + ":8080/video" : null;
-        wifiStatus.setText(wifiUrl != null ? "WiFi: " + wifiUrl
-                : "WiFi: 行動網路不能直連");
+        if (w != null) {
+            wifiUrl = "http://" + w + ":8080/video";
+            // ponytail: 記住最後一次抓到的傳送 ip，切去接收再回來沒 WiFi 時還能顯示原來的
+            wifiSendUrl = wifiUrl;
+            prefs.edit().putString("wifi_send_url", wifiSendUrl).apply();
+        } else {
+            wifiUrl = wifiSendUrl;
+        }
+        wifiStatus.setText(wifiUrl != null ? "WiFi:"+wifiUrl : "WiFi:行動網路不能直連");
+    }
+
+    private void toggleWifiMode() {
+        wifiRecv = !wifiRecv;
+        prefs.edit().putBoolean("wifi_recv", wifiRecv).apply();
+        refreshStatus();
+        applyMode();
+    }
+
+    // ponytail: 傳送=綁相機推流，接收=解綁相機看對方；各做各的不互卡
+    // ponytail: 接收順手關 server，凍結連線不斷 PC 會卡死在 cap.read，連中斷都按不了
+    private void applyMode() {
+        if (wifiRecv) {
+            stopServer();
+            try {
+                if (provider != null) provider.unbindAll();
+            } catch (Exception ignored) {
+            }
+            previewView.setVisibility(View.INVISIBLE);
+            recvView.setVisibility(View.VISIBLE);
+            previewBtn.setEnabled(false);
+            syncHint();
+            startRecv();
+        } else {
+            stopRecv();
+            recvView.setVisibility(View.GONE);
+            recvView.setImageBitmap(null);
+            previewBtn.setEnabled(true);
+            previewView.setVisibility(previewOn ? View.VISIBLE : View.INVISIBLE);
+            syncHint();
+            if (!ensureServer()) {
+                wifiStatus.setText("port 8080 開不起來");
+            }
+            if (provider != null && previewUseCase != null && analysisUseCase != null) {
+                try {
+                    provider.unbindAll();
+                    if (previewOn) {
+                        provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, previewUseCase, analysisUseCase);
+                    } else {
+                        provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysisUseCase);
+                    }
+                } catch (Exception e) {
+                    Toast.makeText(this, "相機重綁失敗: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                }
+            }
+        }
+    }
+
+    private void stopServer() {
+        if (server != null) {
+            server.stop();
+            server = null;
+        }
+    }
+
+    private boolean ensureServer() {
+        if (wifiRecv) return false;
+        if (server == null) server = new MjpegServer(PORT);
+        try {
+            server.start();
+            return true;
+        } catch (java.io.IOException e) {
+            server = null;
+            Toast.makeText(this, "port 8080 開不起來: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+            return false;
+        }
+    }
+
+    // ponytail: 黑屏中央灰字只用一個 TextView；接收來幀就藏，斷了不重叫（要看連線狀態點下面 URL）
+    private void syncHint() {
+        if (wifiRecv) {
+            hint.setText("接收中...");
+            hint.setVisibility(View.VISIBLE);
+        } else if (!previewOn) {
+            hint.setText("預覽已關閉");
+            hint.setVisibility(View.VISIBLE);
+        } else {
+            hint.setVisibility(View.GONE);
+        }
+    }
+
+    private void startRecv() {
+        stopRecv();
+        if (wifiRecvUrl == null) return;
+        final String url = wifiRecvUrl;
+        recvThread = new Thread(() -> recvLoop(url), "mjpeg-recv");
+        recvThread.start();
+    }
+
+    private void stopRecv() {
+        Thread t = recvThread;
+        recvThread = null;
+        if (t != null) t.interrupt();
+    }
+
+    private void recvLoop(String url) {
+        Thread me = Thread.currentThread();
+        boolean told = false;
+        byte[] buf = new byte[1 << 20];
+        byte[] chunk = new byte[8192];
+        while (recvThread == me) {
+            java.net.HttpURLConnection c = null;
+            try {
+                c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                c.setConnectTimeout(3000);
+                c.setReadTimeout(5000);
+                java.io.InputStream in = c.getInputStream();
+                int n = 0;
+                while (recvThread == me) {
+                    int r = in.read(chunk);
+                    if (r < 0) break;
+                    if (n + r > buf.length) n = 0;  // ponytail: 單幀不可能 1MB，爆了就丟掉重攢
+                    System.arraycopy(chunk, 0, buf, n, r);
+                    n += r;
+                    // ponytail: 解碼必須從 SOI 起跳，multipart 檔頭餵進去 BitmapFactory 直接回 null 全黑
+                    int s = findJpegStart(buf, n);
+                    if (s < 0) continue;
+                    if (s > 0) {
+                        System.arraycopy(buf, s, buf, 0, n - s);
+                        n -= s;
+                        s = 0;
+                    }
+                    int e = findJpegEnd(buf, s, n);
+                    if (e > 0) {
+                        final android.graphics.Bitmap bm =
+                                android.graphics.BitmapFactory.decodeByteArray(buf, s, e - s);
+                        int rest = n - e;
+                        System.arraycopy(buf, e, buf, 0, rest);
+                        n = rest;
+                        if (bm != null) runOnUiThread(() -> {
+                            recvView.setImageBitmap(bm);
+                            hint.setVisibility(View.GONE);
+                        });
+                    }
+                }
+            } catch (Exception e) {
+                if (!told) {
+                    told = true;
+                    runOnUiThread(() -> Toast.makeText(this, "連不上 " + url, Toast.LENGTH_SHORT).show());
+                }
+            } finally {
+                if (c != null) c.disconnect();
+            }
+            if (recvThread != me) return;
+            try {
+                Thread.sleep(2000);  // ponytail: 斷線 2 秒重試一次，不狂刷
+            } catch (InterruptedException e) {
+                return;
+            }
+        }
+    }
+
+    // ponytail: 不解析 multipart，直接找 JPEG 頭尾，PC/手機 server 通吃
+    static int findJpegStart(byte[] b, int n) {
+        for (int i = 0; i + 1 < n; i++) {
+            if (b[i] == (byte) 0xFF && b[i + 1] == (byte) 0xD8) return i;
+        }
+        return -1;
+    }
+
+    static int findJpegEnd(byte[] b, int s, int n) {
+        for (int i = s + 2; i + 1 < n; i++) {
+            if (b[i] == (byte) 0xFF && b[i + 1] == (byte) 0xD9) return i + 2;
+        }
+        return -1;
+    }
+
+    // ponytail: 接收模式只輸 IP 就夠，前後綴自動補；貼整串 url 也照取 IP，SharedPreferences 仍存整串
+    private void editRecvUrl() {
+        EditText et = new EditText(this);
+        et.setSingleLine();
+        et.setHint("192.168.1.x");
+        String ip = ipOf(wifiRecvUrl);
+        if (ip != null) et.setText(ip);
+        new AlertDialog.Builder(this)
+                .setTitle("對方 IP")
+                .setView(et)
+                .setPositiveButton("儲存", (d, w) -> {
+                    String got = ipOf(et.getText().toString());
+                    if (got == null) {
+                        Toast.makeText(this, "IP 格式不對", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    wifiRecvUrl = "http://" + got + ":8080/video";
+                    prefs.edit().putString("wifi_recv_url", wifiRecvUrl).apply();
+                    refreshStatus();
+                    applyMode();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    static String ipOf(String s) {
+        if (s == null) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(\\d{1,3}(?:\\.\\d{1,3}){3})").matcher(s.trim());
+        return m.find() ? m.group(1) : null;
     }
 
     // ponytail: 點一下複製整串 url，HINT 時無 url 就不動作
@@ -147,20 +381,45 @@ public class MainActivity extends ComponentActivity {
         ListenableFuture<ProcessCameraProvider> f = ProcessCameraProvider.getInstance(this);
         f.addListener(() -> {
             try {
-                ProcessCameraProvider provider = f.get();
-                Preview preview = new Preview.Builder().build();
-                preview.setSurfaceProvider(previewView.getSurfaceProvider());
-                ImageAnalysis analysis = new ImageAnalysis.Builder()
+                provider = f.get();
+                previewUseCase = new Preview.Builder().build();
+                previewUseCase.setSurfaceProvider(previewView.getSurfaceProvider());
+                analysisUseCase = new ImageAnalysis.Builder()
                         .setTargetResolution(new Size(1280, 720))
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
-                analysis.setAnalyzer(cameraIo, this::onFrame);
+                analysisUseCase.setAnalyzer(cameraIo, this::onFrame);
                 provider.unbindAll();
-                provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis);
+                if (!wifiRecv) {
+                    if (previewOn) {
+                        provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, previewUseCase, analysisUseCase);
+                    } else {
+                        provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysisUseCase);
+                    }
+                }
             } catch (Exception e) {
                 wifiStatus.setText("相機起不來: " + e.getMessage());
             }
         }, ContextCompat.getMainExecutor(this));
+    }
+
+    // ponytail: 只關本地 PreviewView 管線，ImageAnalysis 照推流，PC 不斷線；unbind 才真省電，INVISIBLE 留框不讓按鍵上移
+    private void togglePreview() {
+        if (wifiRecv) return;  // ponytail: 接收模式看的是對方，本地預覽鍵無效
+        previewOn = !previewOn;
+        previewBtn.setText(previewOn ? "關預覽" : "開預覽");
+        previewView.setVisibility(previewOn ? View.VISIBLE : View.INVISIBLE);
+        syncHint();
+        if (provider == null || previewUseCase == null || analysisUseCase == null) return;
+        try {
+            if (previewOn) {
+                provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, previewUseCase);
+            } else {
+                provider.unbind(previewUseCase);
+            }
+        } catch (Exception e) {
+            Toast.makeText(this, "預覽切換失敗: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void onFrame(ImageProxy proxy) {
@@ -183,7 +442,7 @@ public class MainActivity extends ComponentActivity {
                 ByteArrayOutputStream out = new ByteArrayOutputStream(nv21.length);
                 new YuvImage(nv21, ImageFormat.NV21, w, h, null)
                         .compressToJpeg(new Rect(0, 0, w, h), 90, out);
-                server.pushFrame(out.toByteArray(), w, h);
+                if (server != null) server.pushFrame(out.toByteArray(), w, h);  // ponytail: 切接收在飛的幀，server 已關就丟
             }
         } finally {
             proxy.close();
@@ -283,7 +542,8 @@ public class MainActivity extends ComponentActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (server != null) server.stop();
+        stopRecv();
+        stopServer();
         if (cameraIo != null) cameraIo.shutdown();
     }
 }
