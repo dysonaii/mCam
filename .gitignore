@@ -3,6 +3,9 @@
 build/
 app/build/
 local.properties
+*.jks
+keystore.properties
+release/
 *.log
 pc/shots/
 pc/rec/
@@ -11,3 +14,4 @@ pc/mCam.json
 __pycache__/
 *.pyc
 *.json
+*.apk

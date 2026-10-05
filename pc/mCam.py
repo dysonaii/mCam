@@ -22,6 +22,8 @@ MODES = {
     "WiFi 接收端": "http://192.168.1.100:8080/video",
     "WiFi 傳送端": "0",
     "USB webcam": "0",
+    "DPO2014B": "USB",
+    "TDS3014B": "192.168.1.60",
 }
 TX_PORT = 8080  # ponytail: 跟手機端同 port，手機接收照抄 IP 就能看，不另記
 DOWN_SIZES = {"720p": 720, "480p": 480}  # ponytail: 只給事後降級用，存檔一律最高
@@ -78,8 +80,161 @@ def save_cfg(mode: str, urls: dict) -> None:
         pass
 
 
-def open_cap(spec: str) -> cv2.VideoCapture:
+def mode_url(urls: dict, mode: str) -> str:
+    # ponytail: TDS 還沒設過 IP 就帶本機 IP 當起點（同網段，改尾段即可）；設過就用設過的
+    v = urls.get(mode, MODES.get(mode, ""))
+    if mode == "TDS3014B" and v == MODES["TDS3014B"]:
+        v = pc_ip()
+    return v
+    try:
+        CFG.write_text(json.dumps({"mode": mode, "urls": urls}, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+TEK_MODES = ("DPO2014B", "TDS3014B")  # ponytail: 示波器兩台走同一套，訊息/提示不用寫兩份
+
+
+def tek_ip(spec: str) -> str | None:
+    m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", spec)
+    return m.group(1) if m else None
+
+
+def tek_visa_resource(spec: str) -> str | None:
+    # ponytail: USB 走 VISA(USBTMC)；欄位填 USB/auto 就自動找第一台 Tek(0x0699)，填完整 resource 就直用
+    s = spec.strip()
+    if "::" in s:
+        return s
+    try:
+        import pyvisa
+        rcs = pyvisa.ResourceManager().list_resources()
+    except Exception:
+        return None
+    usb = [r for r in rcs if "USB" in r.upper()]
+    if not usb:
+        return None
+    for r in usb:
+        if "0X0699" in r.upper():
+            return r
+    return usb[0]
+
+
+def tek_hint(mode: str) -> str:
+    # ponytail: 範例 IP 用本機同網段，猜中機率高；猜不中就去示波器 Utility>I/O 看
+    if mode == "TDS3014B":
+        return f"TDS使用LAN，填示波器IP(如{pc_ip().rsplit('.', 1)[0]}.60)"
+    return "DPO使用USB，欄位填USB"
+
+
+def tek_probe(spec: str, mode: str) -> bool:
+    # ponytail: DPO只看 VISA 有沒有 USB 貨；TDS先探 VXI-11 portmapper(111)，1.5s 不通就不叫 VISA，UI 不凍結
+    if mode == "TDS3014B":
+        host = tek_ip(spec)
+        if not host:
+            return False
+        try:
+            with socket.create_connection((host, 111), timeout=1.5):
+                return True
+        except Exception:
+            return False
+    if tek_ip(spec):
+        return False
+    return tek_visa_resource(spec) is not None
+
+
+def tek_png(raw: bytes):
+    # ponytail: 先剝 IEEE488.2 binary block 頭(#<x><len>)再 imdecode(自動判 PNG/BMP)；剝失敗才用 PNG 頭尾硬切
+    data = raw
+    if raw[:1] == b"#" and raw[1:2].isdigit():
+        n = int(raw[1:2])
+        if raw[2:2 + n].isdigit():
+            ln = int(raw[2:2 + n] or 0)
+            data = raw[2 + n:2 + n + ln]
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is not None:
+        return img
+    i, j = raw.find(b"\x89PNG"), raw.find(b"IEND")
+    if i >= 0 and j >= 0:
+        return cv2.imdecode(np.frombuffer(raw[i:j + 8], np.uint8), cv2.IMREAD_COLOR)
+    return None
+
+
+class TekCap:
+    # ponytail: 介面跟 cv2.VideoCapture 對齊(read/isOpened/release)，主迴圈不用分支；
+    # 示波器一張要幾秒，背景 thread 慢慢抓，主迴圈拿最新幀即可，不阻塞預覽
+    def __init__(self, spec: str, model: str = "dpo"):
+        self._frame = None
+        self._ok = False
+        self._run = True
+        self._inst = None
+        try:
+            import pyvisa
+            if model == "tds":
+                # ponytail: TDS3000 只認舊指令集；PORT 要指明 ETHERNET（新系列才會自動）
+                host = tek_ip(spec)
+                inst = pyvisa.ResourceManager().open_resource(f"TCPIP::{host}::INSTR")
+                inst.timeout = 20000  # ponytail: 10Base-T+老 CPU，截圖慢，timeout 給寬
+                inst.write("HARDCOPY:FORMAT PNG")
+                inst.write("HARDCOPY:PORT ETHERNET")
+            else:
+                if tek_ip(spec):
+                    return  # ponytail: DPO 使用 USB，填 IP 直接拒，免得靜默連到別台
+                res = tek_visa_resource(spec)
+                inst = pyvisa.ResourceManager().open_resource(res)
+                inst.timeout = 8000
+                inst.write("SAVe:IMAGe:FILEFormat PNG")
+            self._inst = inst
+            self._ok = True
+        except Exception:
+            self._run = False
+            return
+        threading.Thread(target=self._poll, daemon=True).start()
+
+    def _grab(self):
+        self._inst.write("HARDCopy STARt")
+        return tek_png(bytes(self._inst.read_raw()))
+
+    def _poll(self):
+        while self._run:
+            try:
+                img = self._grab()
+            except Exception:
+                time.sleep(2)
+                continue
+            if img is not None:
+                if img.shape[1] < 640:
+                    # ponytail: DPO 原生 480x234 才 2x 放大；TDS 640x480 不動
+                    img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                self._frame = img
+            time.sleep(1)
+
+    def isOpened(self) -> bool:
+        return self._ok
+
+    def read(self):
+        if self._frame is not None:
+            return True, self._frame.copy()
+        time.sleep(0.1)
+        return False, None
+
+    def release(self) -> None:
+        self._run = False
+        try:
+            if self._inst is not None:
+                self._inst.close()
+        except Exception:
+            pass
+
+    def get(self, _id) -> float:
+        return 0.0
+
+
+def open_cap(spec: str, mode: str = ""):
     spec = spec.strip()
+    if mode == "DPO2014B":
+        return TekCap(spec, "dpo")
+    if mode == "TDS3014B":
+        return TekCap(spec, "tds")
     if spec.isdigit():
         # ponytail: 解析度一律要最高；驅動會自動 clamp 到裝置上限，不用列舉
         cap = cv2.VideoCapture(int(spec), cv2.CAP_DSHOW)
@@ -256,6 +411,8 @@ def make_writer(path: Path, w: int, h: int, fps: float) -> cv2.VideoWriter:
 
 def pick_reachable(spec: str, mode: str) -> str | None:
     # ponytail: 只探使用者填的；USB 才多試 RNDIS 閘道(各牌網段不同)，WiFi 同區網不猜
+    if mode in TEK_MODES:
+        return spec if tek_probe(spec, mode) else None
     cands = [spec]
     if mode == "USB 共享":
         gw = rndis_gateway()
@@ -340,7 +497,28 @@ def play_file(path: Path) -> None:
     if img is None:
         return
     if path.suffix.lower() == ".jpg":
-        win = sg.Window(path.name, [[sg.Image(data=img)]], modal=True)
+        full = cv2.imread(str(path))
+        if full is None:
+            return
+        h0, w0 = full.shape[:2]
+        base = min(1.0, 900 / w0, 700 / h0)
+        z = 1.0
+
+        def render():
+            w, h = max(1, int(w0 * base * z)), max(1, int(h0 * base * z))
+            sm = full if (w, h) == (w0, h0) else cv2.resize(
+                full, (w, h), interpolation=cv2.INTER_CUBIC if z >= 1 else cv2.INTER_AREA)
+            return cv2.imencode(".png", sm)[1].tobytes()
+
+        win = sg.Window(path.name, [[sg.Image(data=render(), key="-P-")]], modal=True, finalize=True)
+
+        def wheel(ev):
+            # ponytail: PSG 事件拿不到 delta，直接綁 tk；同 thread 回呼，update 安全
+            nonlocal z
+            z = min(8.0, max(0.2, z * (1.25 if ev.delta > 0 else 0.8)))
+            win["-P-"].update(data=render())
+
+        win["-P-"].Widget.bind("<MouseWheel>", wheel)
         win.read()
         win.close()
         return
@@ -504,12 +682,14 @@ def main() -> None:
          sg.Input(tx_url() if cur_mode == "WiFi 傳送端" else urls[cur_mode], key="-URL-", size=(40, 1))],
         [sg.Button("連線"), sg.Button("中斷"),
          sg.Button("截圖"), sg.Button("●錄影", key="-REC-"),
-         sg.Button("圖庫")],
-        [sg.Text("USB /WiFi 填IP；webcam/傳送填0/1", key="-STATUS-", size=(60, 1))],
+         sg.Button("圖庫"), sg.Button("資料夾")],
+        [sg.Text("USB /WiFi 填IP；webcam/傳送填0/1；DPO填USB；TDS填示波器IP", key="-STATUS-", size=(60, 1))],
     ]
     window = sg.Window("mCam", layout, finalize=True)
     window.set_icon(str(ICON))  # ponytail: 建構式吃 icon 不會套用(實測)，要事後 set_icon
-    cap: cv2.VideoCapture | None = None
+    if cur_mode in TEK_MODES:
+        window["-STATUS-"].update(tek_hint(cur_mode))
+    cap = None
     writer: cv2.VideoWriter | None = None
     frame = None
     fails = 0
@@ -527,6 +707,8 @@ def main() -> None:
                 urls[cur_mode] = window["-URL-"].get()
             cur_mode = values["-MODE-"]
             window["-URL-"].update(tx_url() if cur_mode == "WiFi 傳送端" else urls[cur_mode])
+            if cur_mode in TEK_MODES:
+                window["-STATUS-"].update(tek_hint(cur_mode))
             save_cfg(cur_mode, urls)
         if event == "連線":
             tx_stop()
@@ -535,7 +717,8 @@ def main() -> None:
                 cap.release()
                 cap = None
             spec = window["-URL-"].get()
-            if values["-MODE-"] == "WiFi 傳送端":
+            mode_now = values["-MODE-"]
+            if mode_now == "WiFi 傳送端":
                 # ponytail: 欄位是顯示用 URL，手填 0/1 才當 cam index 收下；傳送端永不探測，壞值回 0
                 typed = spec.strip()
                 spec = typed if typed.isdigit() else urls.get("WiFi 傳送端", "0")
@@ -544,17 +727,25 @@ def main() -> None:
             if not spec.strip().isdigit():
                 window["-STATUS-"].update("連線中(快探 server)...")
                 window.refresh()
-                hit = pick_reachable(spec, values["-MODE-"])
+                hit = pick_reachable(spec, mode_now)
                 if hit is None:
-                    window["-STATUS-"].update("連不上：USB共享開了嗎？手機 App 在前景？或改填手機畫面上的 IP")
+                    if mode_now == "DPO2014B":
+                        msg = "連不上：USB線接了嗎？要裝 pyvisa+NI-VISA(見 README)"
+                    elif mode_now == "TDS3014B":
+                        msg = "連不上：TDS的IP對嗎？同網段嗎？(Utility>I/O 看)"
+                    else:
+                        msg = "連不上：USB共享開了嗎？手機 App 在前景？或改填手機畫面上的 IP"
+                    window["-STATUS-"].update(msg)
                     set_black(window, "已斷線")
                     continue
                 if hit != spec:
                     window["-URL-"].update(hit)  # ponytail: 自動找到就寫回
                     spec = hit
-            cap = open_cap(spec)
+            cap = open_cap(spec, mode_now)
             fails = 0
-            src_fps = 20.0 if spec.strip().isdigit() else server_fps(spec)
+            # ponytail: 示波器幾秒一張，錄影 fps 寫 2.0/1.0 就夠，不猜 server fps
+            src_fps = {"DPO2014B": 2.0, "TDS3014B": 1.0}.get(
+                mode_now, 20.0 if spec.strip().isdigit() else server_fps(spec))
             if values["-MODE-"] != "WiFi 傳送端" or spec.strip().isdigit():
                 urls[values["-MODE-"]] = spec
                 save_cfg(values["-MODE-"], urls)
@@ -583,6 +774,9 @@ def main() -> None:
             window["-STATUS-"].update(f"已存 {p.name}")
         elif event == "圖庫":
             gallery()
+        elif event == "資料夾":
+            # ponytail: 開 pc/ 目錄(shots+rec 都在裡面)，一顆按鈕涵蓋兩個輸出；subprocess 已有
+            subprocess.Popen(["explorer", str(BASE)])
         elif event == "-REC-":
             if writer is None:
                 if frame is None:
@@ -623,11 +817,15 @@ def main() -> None:
                     fails = 0
                     set_black(window, "已斷線")  # ponytail: 斷線先黑屏，有幀回來自動蓋掉
                     spec_now = window["-URL-"].get()
-                    if spec_now.strip().isdigit() or server_ok(spec_now):
+                    mode_now = window["-MODE-"].get()
+                    ok_now = (spec_now.strip().isdigit() or tek_probe(spec_now, mode_now)
+                              if mode_now in TEK_MODES else
+                              (spec_now.strip().isdigit() or server_ok(spec_now)))
+                    if ok_now:
                         window["-STATUS-"].update("重連中...")
                         window.refresh()
                         cap.release()
-                        cap = open_cap(spec_now)
+                        cap = open_cap(spec_now, mode_now)
                         if not cap.isOpened():
                             window["-STATUS-"].update("斷線：重連失敗，檢查手機/線")
                     else:

@@ -1,3 +1,4 @@
 PySimpleGUI>=6
 opencv-python
+pyvisa  # DPO2014B 用 USB 接才需要；另需裝 NI-VISA 或 TekVISA runtime（見 README）
 # 錄影 H.264 另需手動放 openh264-2.5.0-win64.dll（pip 裝不到，見 README）

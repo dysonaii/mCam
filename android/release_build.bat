@@ -1,0 +1,34 @@
+@echo off
+rem mCam release build: auto-creates keystore on first run (local only, gitignored). APK -> release\
+setlocal
+cd /d %~dp0
+
+rem ponytail: 新版 Studio 的 jbr 常剩 runtime（沒 javac/keytool），優先拿 Gradle 自動裝的 toolchain JDK（有 javac 才算數）
+set "JDK="
+if defined JAVA_HOME if exist "%JAVA_HOME%\bin\javac.exe" set "JDK=%JAVA_HOME%"
+if not defined JDK for /d %%d in ("%USERPROFILE%\.gradle\jdks\*") do if exist "%%d\bin\javac.exe" set "JDK=%%d"
+if not defined JDK if exist "C:\Program Files\Android\Android Studio\jbr\bin\javac.exe" set "JDK=C:\Program Files\Android\Android Studio\jbr"
+if defined JDK set "JAVA_HOME=%JDK%"
+set "KEYTOOL=%JAVA_HOME%\bin\keytool.exe"
+if not exist "%KEYTOOL%" for /f "delims=" %%k in ('where keytool 2^>nul') do set "KEYTOOL=%%k"
+if not exist "%KEYTOOL%" echo [ERR] keytool not found. Install Android Studio or set JAVA_HOME. && exit /b 1
+
+if not exist mCam-release.jks (
+  echo [1/3] generating keystore - first run only...
+  "%KEYTOOL%" -genkeypair -keystore mCam-release.jks -alias mcam -keyalg RSA -keysize 2048 -validity 9125 -storepass mcam-release -keypass mcam-release -dname "CN=mCam" || exit /b 1
+  (
+    echo storeFile=mCam-release.jks
+    echo storePassword=mcam-release
+    echo keyAlias=mcam
+    echo keyPassword=mcam-release
+  ) > keystore.properties
+)
+
+echo [2/3] assembleRelease...
+call gradlew.bat assembleRelease --console=plain || exit /b 1
+
+set VER=unknown
+for /f "tokens=3" %%v in ('findstr /r "versionName" app\build.gradle') do set VER=%%~v
+if not exist release mkdir release
+copy /y app\build\outputs\apk\release\app-release.apk release\mCam-v%VER%.apk || exit /b 1
+echo [3/3] done: release\mCam-v%VER%.apk

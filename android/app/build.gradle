@@ -2,6 +2,11 @@ plugins {
     id("com.android.application")
 }
 
+// ponytail: 簽名密碼只讀本機 keystore.properties（release_build.bat 產生，不進版控），不寫死在 repo
+def ksProps = new Properties()
+def ksFile = rootProject.file("keystore.properties")
+if (ksFile.exists()) ksFile.withInputStream { ksProps.load(it) }
+
 android {
     namespace = "com.mcam.app"
     compileSdk = 34
@@ -14,15 +19,31 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        release {
+            storeFile rootProject.file(ksProps.getProperty("storeFile", "mCam-release.jks"))
+            storePassword ksProps.getProperty("storePassword", "")
+            keyAlias ksProps.getProperty("keyAlias", "mcam")
+            keyPassword ksProps.getProperty("keyPassword", "")
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled = false
+            // ponytail: 有 keystore.properties(本機 bat 產生，不進版控)才簽名；沒有就出 unsigned，照樣能 build
+            if (ksFile.exists()) signingConfig signingConfigs.release
         }
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    // ponytail: AGP lint 跟 Gradle 9.6 犯沖(sequenceOf)，release 跳過它；跟程式碼無關
+    lint {
+        checkReleaseBuilds = false
     }
 }
 
