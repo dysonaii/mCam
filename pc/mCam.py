@@ -378,34 +378,44 @@ def gallery() -> None:
     hl = "#FFD24D"
     bg, fg = sg.theme_background_color(), sg.theme_text_color()
     sel: set[str] = set()
-    alive: set[str] = set()
-    cells = []
+    thumbs: dict[str, bytes] = {}
     for lb in file_labels():
         tb = thumb_bytes(label_to_path(lb))
-        if tb is None:
-            continue
-        alive.add(lb)
-        cells.append(sg.Column([[sg.Button(image_data=tb, key=f"V:{lb}", border_width=0, pad=(8, 8))],
-                                [sg.Text(lb[4:][:14], size=(14, 1), key=f"T:{lb}")]],
-                               key=f"C:{lb}"))
-    rows = [cells[i:i + 4] for i in range(0, len(cells), 4)]
+        if tb is not None:
+            thumbs[lb] = tb
+    order: list[str] = list(thumbs)  # ponytail: 位置鍵(V:0..)綁圖，刪檔只換圖不動格，重排又不閃
+    cells = []
+    for i, lb in enumerate(order):
+        cells.append(sg.Column([[sg.Button(image_data=thumbs[lb], key=f"V:{i}", border_width=0, pad=(8, 8))],
+                                [sg.Text(lb[4:][:14], size=(14, 1), key=f"T:{i}")]],
+                               key=f"C:{i}"))
+    rows = [cells[i:i + 5] for i in range(0, len(cells), 5)]
     has_empty = bool(rows)
     rows.append([sg.Text("還沒有檔案", key="EMPTY")])
-    rows.append([sg.Button("放", key="PLAY", disabled=True),
-                 sg.Button("壓", key="DOWN", disabled=True),
-                 sg.Button("刪", key="DEL", disabled=True)])
-    win = sg.Window("圖庫", rows, modal=True, finalize=True)
+    layout = [[sg.Column(rows, scrollable=True, vertical_scroll_only=True,
+                         size=(950, 500), key="-GRID-")],
+              [sg.Button("放", key="PLAY", disabled=True),
+               sg.Button("壓", key="DOWN", disabled=True),
+               sg.Button("刪", key="DEL", disabled=True),
+               sg.Button("全選", key="ALL"),
+               sg.Button("全不選", key="NONE")]]
+    win = sg.Window("圖庫", layout, modal=True, finalize=True)
+    win.bind("<Control-a>", "ALL")  # ponytail: 共用 ALL 鍵，不另分支
+    win.bind("<Control-A>", "ALL")
     if has_empty:
         win["EMPTY"].update(visible=False)  # ponytail: 建時可見再藏(藏會存 pack 設定)，全刪光才叫得回來
-    for lb in alive:
-        win[f"V:{lb}"].bind("<Double-Button-1>", "+DBL")  # ponytail: 點兩下直接放；第一下選取無害，不用消抖 timer
+    for i in range(len(order)):
+        win[f"V:{i}"].bind("<Double-Button-1>", "+DBL")  # ponytail: 點兩下直接放；第一下選取無害，不用消抖 timer
+
+    def idx_of(lb: str) -> int:
+        return order.index(lb)
 
     def paint(lb: str, color: str) -> None:
-        w = win[f"C:{lb}"].Widget
+        w = win[f"C:{idx_of(lb)}"].Widget
         w.configure(background=color)
         for k in w.winfo_children():  # ponytail: Column 內外兩層 Frame 都要染
             k.configure(background=color)
-        win[f"T:{lb}"].update(text_color=hl if color == hl else fg)
+        win[f"T:{idx_of(lb)}"].update(text_color=hl if color == hl else fg)
 
     def sync_btns() -> None:
         n = len(sel)
@@ -421,7 +431,7 @@ def gallery() -> None:
         if dbl:
             ev = ev[:-4]
         if ev.startswith("V:"):
-            lb = ev[2:]
+            lb = order[int(ev[2:])]
             if ctrl_down() and not dbl:
                 if lb in sel:
                     sel.discard(lb)
@@ -438,8 +448,18 @@ def gallery() -> None:
             if dbl:
                 play_file(label_to_path(lb))
             continue
-        lab = next(iter(sel))  # ponytail: 放/壓被 disabled 擋，這裡必單選
-        if ev == "PLAY":
+        lab = next(iter(sel), "")  # ponytail: 放/壓被 disabled 擋，這裡必單選；ALL/NONE 經此不取也無害
+        if ev == "ALL":
+            sel = set(order)
+            for s in sel:
+                paint(s, hl)
+            sync_btns()
+        elif ev == "NONE":
+            for s in sel:
+                paint(s, bg)
+            sel = set()
+            sync_btns()
+        elif ev == "PLAY":
             play_file(label_to_path(lab))
         elif ev == "DOWN":
             p = label_to_path(lab)
@@ -452,10 +472,22 @@ def gallery() -> None:
             if sg.popup_yes_no(q) == "Yes":
                 for s in sel:
                     label_to_path(s).unlink(missing_ok=True)
-                    win[f"C:{s}"].update(visible=False)  # ponytail: 隱藏不重建，重建會閃
-                alive -= sel
+                    del thumbs[s]
+                order = [lb for lb in order if lb in thumbs]
+                for i in range(len(cells)):  # ponytail: 前段換圖、尾段隱藏，格子不動所以不閃
+                    if i < len(order):
+                        win[f"V:{i}"].update(image_data=thumbs[order[i]])
+                        win[f"T:{i}"].update(order[i][4:][:14])
+                        win[f"C:{i}"].update(visible=True)
+                        w = win[f"C:{i}"].Widget
+                        w.configure(background=bg)
+                        for k in w.winfo_children():
+                            k.configure(background=bg)
+                        win[f"T:{i}"].update(text_color=fg)
+                    else:
+                        win[f"C:{i}"].update(visible=False)
                 sel = set()
-                if not alive and has_empty:
+                if not order and has_empty:
                     win["EMPTY"].update(visible=True)
                 sync_btns()
     win.close()
