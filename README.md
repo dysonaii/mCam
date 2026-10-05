@@ -7,8 +7,8 @@
 - **雙向互傳**：手機可傳可收，PC 可收可傳（四種組合，見下表）
 - **手機傳送**：USB 共享 / WiFi，MJPEG server 跑 `:8080`（`/video` `/snapshot` `/info`）
 - **手機接收**：切 `WiFi 接收端`，輸對方 IP 就播（只輸 IP，前後綴自動補，有記憶）
-- **PC 接收**：`USB 共享` / `WiFi 接收端` / `USB webcam` / `DPO2014B`（只吃 USB，欄位填 `USB`）/ `TDS3014B`（只吃 LAN，填示波器 IP；約幾秒一張）；斷線自動重連，斷線黑屏灰字 `已斷線`
-- **PC 傳送**：`WiFi 傳送端`，播本地 webcam，欄位自動帶 `http://本機IP:8080/video` 給手機填
+- **PC 接收**：`USB 共享` / `WiFi 接收端` / `USB webcam` / `DPO2014B`（使用 USB，欄位填 `USB`）/ `TDS3014B`（使用 LAN，填示波器 IP；約幾秒一張）；斷線自動重連，斷線黑屏灰字 `已斷線`
+- **PC 傳送**：`WiFi 傳送端`，只播本地 webcam（填 `0/1`；示波器/手機源不能轉播），欄位自動帶 `http://本機IP:8080/video` 給手機填
 - **手機預覽開關**：`關預覽` 只停本地顯示（黑屏+`預覽已關閉`），推流不斷；接收中黑屏顯示 `接收中...`
 - **截圖**：一律最高畫質 JPG，存 `pc/shots/`
 - **錄影**：一律最高畫質 MP4（H.264），存 `pc/rec/`；畫面顯示錄影秒數
@@ -26,11 +26,14 @@
 | --- | --- | --- |
 | WiFi 傳送端 | WiFi 接收端 | 同一 WiFi，PC 填手機畫面的 IP |
 | WiFi 接收端 | WiFi 傳送端 | 同一 WiFi，手機填 PC 顯示的 IP |
-| （USB 共享開）傳送 | USB 共享 | 手機開 USB 數據共享插 PC，PC 按連線（自動找 RNDIS 閘道） |
+| USB 共享傳送 | USB 共享 | 手機開 USB 數據共享插 PC，PC 按連線（自動找 RNDIS 閘道） |
+| — | USB webcam | PC 本機鏡頭，欄位填 `0/1` |
+| — | DPO2014B | 示波器 USB 直連 PC，PC 欄位填 `USB` |
+| — | TDS3014B | 示波器接 LAN，PC 欄位填示波器 IP |
 
 手機按鍵同一排：`[USB 共享] [WiFi 傳送端/接收端] [關預覽]`，下面兩行是 USB / WiFi 的 URL，點一下複製。接收模式點 WiFi 那行改對方 IP（只打 `192.168.x.x` 即可）。
 
-PC 欄位：`USB 共享` / `WiFi 接收端` 填對方 URL；`WiFi 傳送端` / `USB webcam` 填 `0/1`（傳送端欄位會自動帶本機 URL，那是給手機看的）。
+PC 欄位：`USB 共享` / `WiFi 接收端` 填對方 URL；`WiFi 傳送端` / `USB webcam` 填 `0/1`（傳送端欄位會自動帶本機 URL，那是給手機看的）；`DPO2014B` 填 `USB`；`TDS3014B` 填示波器 IP（沒設過預設帶本機 IP，改尾段即可）。
 
 ### 不在同一區網時
 
@@ -53,7 +56,7 @@ pip install -r pc\requirements.txt
 | --- | --- | --- |
 | `PySimpleGUI>=6` | 主視窗/圖庫 UI | 不能跑（必需） |
 | `opencv-python` | 預覽/截圖/錄影/轉檔 | 不能跑（必需） |
-| `pyvisa` | DPO2014B 用 USB 抓圖（USBTMC） | 只缺示波器源，其他功能正常 |
+| `pyvisa` | 示波器抓圖（DPO 走 USBTMC，TDS 走 LAN VXI-11） | 只缺示波器源，其他功能正常 |
 
 手動裝的東西（pip 裝不到），缺了也能跑、只是降級：
 
@@ -63,7 +66,7 @@ pip install -r pc\requirements.txt
    3. 沒放自動退回 mp4v（檔較大）；console 出現 `Failed to load OpenH264` 就是缺它
 2. **VISA runtime**（示波器才需要，二選一：NI-VISA 或 TekVISA；示波器附的光碟有，或 Tek/NI 官網下載）：
    1. DPO2014B：後面 USB device 口用 USB 線接 PC（走 USBTMC，裝置管理員會出現 `USB Test and Measurement Device (IVI)`）；PC 端切 `DPO2014B`，欄位填 `USB`（自動找示波器）→ 按連線
-   2. TDS3014B：網路線接 LAN（內建 10Base-T），示波器 Utility → I/O 看 IP；PC 端切 `TDS3014B`，欄位填該 IP → 按連線（走 VXI-11，不用加裝任何模組）
+   2. TDS3014B：網路線接 LAN（內建 10Base-T），示波器 Utility → I/O 看 IP；PC 端切 `TDS3014B`，欄位沒設過會先帶本機 IP（同網段，改尾段即可）→ 按連線（走 VXI-11，不用加裝任何模組）
    3. 沒裝 VISA 按連線會顯示要裝 pyvisa+NI-VISA，其他來源不受影響
    4. DPO 截圖原生只有 480×234、TDS 只有 640×480（面板物理解析度）；DPO 會 2x 放大顯示/存檔；真要高清得改抓波形重畫（未做）
 
