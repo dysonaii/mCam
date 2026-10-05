@@ -287,15 +287,29 @@ _tx_srv: ThreadingHTTPServer | None = None
 
 
 def pc_ip() -> str:
-    # ponytail: 第一個非迴路 IPv4 就夠；區網直連用，不猜哪張卡
+    # ponytail: 只要 IPv4(不用 IPv6，URL 不用加括號)；多網卡時私網優先，不只看預設路由
+    cands: list[str] = []
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
+        cands.append(s.getsockname()[0])
         s.close()
-        return ip
     except Exception:
-        return "127.0.0.1"
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and ip not in cands:
+                cands.append(ip)
+    except Exception:
+        pass
+    cands = [c for c in cands if c and not c.startswith("127.") and "." in c and ":" not in c]
+
+    def rank(ip: str) -> int:
+        return 0 if ip.startswith("192.168.") else 1 if ip.startswith("10.") else 2 if re.match(r"172\.(1[6-9]|2\d|3[01])\.", ip) else 3
+
+    cands.sort(key=rank)
+    return cands[0] if cands else "127.0.0.1"
 
 
 def tx_url() -> str:
@@ -523,8 +537,13 @@ def play_file(path: Path) -> None:
         win.close()
         return
     cap = cv2.VideoCapture(str(path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 20.0  # ponytail: 秒數用幀數/fps 算，不另存 metadata
+    n = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    dur = n / fps if fps > 0 and n > 0 else 0
+    fmt = lambda s: f"{int(s) // 60:02d}:{int(s) % 60:02d}"
     win = sg.Window(path.name, [[sg.Image(key="-P-", data=img)],
-                                [sg.Button("暫停", key="-PP-"), sg.Button("關閉")]],
+                                [sg.Button("暫停", key="-PP-"), sg.Button("關閉"),
+                                 sg.Text(f"00:00/{fmt(dur)}" if dur else "00:00", key="-T-")]],
                     modal=True, finalize=True)
     paused = False
     while True:
@@ -539,6 +558,8 @@ def play_file(path: Path) -> None:
         ok, fr = cap.read()
         if not ok:  # ponytail: 播完就關，不做進度條/重播
             break
+        el = cap.get(cv2.CAP_PROP_POS_FRAMES) / fps if fps > 0 else 0
+        win["-T-"].update(f"{fmt(el)}/{fmt(dur)}" if dur else fmt(el))
         if fr.shape[1] > 640:
             fr = cv2.resize(fr, (640, int(fr.shape[0] * 640 / fr.shape[1])))
         win["-P-"].update(data=cv2.imencode(".png", fr)[1].tobytes())
@@ -682,11 +703,31 @@ def main() -> None:
          sg.Input(tx_url() if cur_mode == "WiFi 傳送端" else urls[cur_mode], key="-URL-", size=(40, 1))],
         [sg.Button("連線"), sg.Button("中斷"),
          sg.Button("截圖"), sg.Button("●錄影", key="-REC-"),
-         sg.Button("圖庫"), sg.Button("資料夾")],
+         sg.Button("圖庫"), sg.Button("資料夾"),
+         sg.Checkbox("轉播", default=False, key="-TX-", enable_events=True,
+                     tooltip="勾=區網 browser 可開 http://本機IP:8080/video 看")],
         [sg.Text("USB /WiFi 填IP；webcam/傳送填0/1；DPO填USB；TDS填示波器IP", key="-STATUS-", size=(60, 1))],
     ]
     window = sg.Window("mCam", layout, finalize=True)
     window.set_icon(str(ICON))  # ponytail: 建構式吃 icon 不會套用(實測)，要事後 set_icon
+
+    def tx_show() -> None:
+        # ponytail: IP 直接寫在 checkbox 本體上，不另加一行
+        window["-TX-"].update(text=f"轉播 {tx_url()}")
+
+    def tx_hide() -> None:
+        window["-TX-"].update(text="轉播")
+
+    def tx_copy(_ev=None) -> None:
+        # ponytail: checkbox 上右鍵點一下即複製轉播 URL
+        try:
+            window.TKroot.clipboard_clear()
+            window.TKroot.clipboard_append(tx_url())
+            window["-STATUS-"].update(f"已複製 {tx_url()}")
+        except Exception:
+            pass
+
+    window["-TX-"].Widget.bind("<Button-3>", tx_copy)
     if cur_mode in TEK_MODES:
         window["-STATUS-"].update(tek_hint(cur_mode))
     cap = None
@@ -713,6 +754,7 @@ def main() -> None:
         if event == "連線":
             tx_stop()
             tx_on = False
+            tx_hide()
             if cap is not None:
                 cap.release()
                 cap = None
@@ -750,24 +792,44 @@ def main() -> None:
                 urls[values["-MODE-"]] = spec
                 save_cfg(values["-MODE-"], urls)
             window["-STATUS-"].update("連線中..." if cap.isOpened() else "連不上：webcam被佔用？換 0/1 試試")
-            if values["-MODE-"] == "WiFi 傳送端" and cap.isOpened():
-                # ponytail: 傳送=本地 webcam 邊播邊 serve，手機接收端填 STATUS 上的 IP 即可
-                fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
-                src_fps = fps if fps > 0 else 20.0
+            if cap.isOpened() and values.get("-TX-"):
+                # ponytail: 勾轉播=任何來源都 serve，區網 browser 開 /video 即看
                 if tx_start(src_fps):
                     tx_on = True
-                    window["-URL-"].update(tx_url())
-                    window["-STATUS-"].update(f"傳送中 {tx_url()}（手機切WIFI接收填此 IP）")
+                    tx_show()
+                    window["-STATUS-"].update(f"已連線+轉播中 {tx_url()}")
                 else:
-                    window["-STATUS-"].update(f"傳送失敗：port {TX_PORT} 被佔用")
+                    tx_hide()
+                    window["-STATUS-"].update(f"已連線但轉播失敗：port {TX_PORT} 被佔用")
         elif event == "中斷":
             tx_stop()
             tx_on = False
+            tx_hide()
             if cap is not None:
                 cap.release()
                 cap = None
             set_black(window, "已斷線")
             window["-STATUS-"].update("已中斷")
+        elif event == "-TX-":
+            # ponytail: 勾=有畫面就即開 serve，沒連線就等連線時開；取消勾即停
+            if values.get("-TX-"):
+                if cap is not None and cap.isOpened():
+                    if tx_start(src_fps):
+                        tx_on = True
+                        tx_show()
+                        window["-STATUS-"].update(f"轉播中 {tx_url()}")
+                    else:
+                        tx_hide()
+                        window["-STATUS-"].update(f"轉播失敗：port {TX_PORT} 被佔用")
+                else:
+                    tx_hide()
+                    window["-STATUS-"].update("已勾轉播，按連線後生效")
+            else:
+                tx_stop()
+                tx_on = False
+                tx_hide()
+                if cap is not None and cap.isOpened():
+                    window["-STATUS-"].update("已連線（轉播已關）")
         elif event == "截圖" and frame is not None:
             p = SHOTS / f"IMG_{datetime.now():%Y%m%d_%H%M%S}.jpg"
             cv2.imwrite(str(p), frame, [cv2.IMWRITE_JPEG_QUALITY, 100])  # ponytail: 截圖一律最高，不留選項

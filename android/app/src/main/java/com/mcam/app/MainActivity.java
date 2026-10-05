@@ -531,7 +531,8 @@ public class MainActivity extends ComponentActivity {
                     java.net.InetAddress addr = a.nextElement();
                     if (addr.isLoopbackAddress() || !(addr instanceof java.net.Inet4Address))
                         continue;
-                    return addr.getHostAddress();
+                    String ip = addr.getHostAddress();  // ponytail: 只要 IPv4，不帶 %wlan0
+                    return ip == null ? null : ip.split("%")[0];
                 }
             }
         } catch (Exception ignored) {
