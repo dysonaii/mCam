@@ -167,6 +167,7 @@ class TekCap:
         self._ok = False
         self._run = True
         self._inst = None
+        self._err = ""
         try:
             import pyvisa
             if model == "tds":
@@ -178,6 +179,7 @@ class TekCap:
                 inst.write("HARDCOPY:PORT ETHERNET")
             else:
                 if tek_ip(spec):
+                    self._err = "DPO使用USB，欄位填USB"
                     return  # ponytail: DPO 使用 USB，填 IP 直接拒，免得靜默連到別台
                 res = tek_visa_resource(spec)
                 inst = pyvisa.ResourceManager().open_resource(res)
@@ -185,7 +187,8 @@ class TekCap:
                 inst.write("SAVe:IMAGe:FILEFormat PNG")
             self._inst = inst
             self._ok = True
-        except Exception:
+        except Exception as e:
+            self._err = str(e)  # ponytail: 開不起來的原因留著，UI 直接顯示，不用猜
             self._run = False
             return
         threading.Thread(target=self._poll, daemon=True).start()
@@ -791,7 +794,13 @@ def main() -> None:
             if values["-MODE-"] != "WiFi 傳送端" or spec.strip().isdigit():
                 urls[values["-MODE-"]] = spec
                 save_cfg(values["-MODE-"], urls)
-            window["-STATUS-"].update("連線中..." if cap.isOpened() else "連不上：webcam被佔用？換 0/1 試試")
+            if cap.isOpened():
+                window["-STATUS-"].update("連線中...")
+            elif mode_now in TEK_MODES:
+                # ponytail: 示波器開不起來多半是 VISA/驅動層(看得到打不開)，直接秀原因；重插 USB/重開示波器多半就好
+                window["-STATUS-"].update(f"連不上：{getattr(cap, '_err', '') or 'VISA打不開'}（試重插USB/重開示波器/關NI-MAX）")
+            else:
+                window["-STATUS-"].update("連不上：webcam被佔用？換 0/1 試試")
             if cap.isOpened() and values.get("-TX-"):
                 # ponytail: 勾轉播=任何來源都 serve，區網 browser 開 /video 即看
                 if tx_start(src_fps):
