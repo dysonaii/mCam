@@ -24,6 +24,7 @@ MODES = {
     "DPO2014B": "USB",
     #"TDS3014B": "192.168.1.60",
 }
+RX_MODES = ("USB", "WiFi", "DPO2014B")  # ponytail: 收發兩邊無交集，方向由 mode 推出，不另存
 TX_PORT = 8080  # ponytail: 跟手機端同 port，手機接收照抄 IP 就能看，不另記
 DOWN_SIZES = {"720p": 720, "480p": 480}  # ponytail: 只給事後降級用，存檔一律最高
 BASE = Path(__file__).parent
@@ -69,17 +70,21 @@ def load_cfg() -> dict:
         urls.update(saved)
         if d.get("url"):
             urls[m] = d["url"]
-        return {"mode": m, "urls": urls, "tx_ip": d.get("tx_ip")}
+        tx = {k: False for k in MODES}
+        tx.update({k: bool(v) for k, v in (d.get("tx") or {}).items() if k in MODES})
+        return {"mode": m, "urls": urls, "tx_ip": d.get("tx_ip"), "tx": tx}
     except Exception:
-        return {"mode": "USB", "urls": dict(MODES), "tx_ip": None}
+        return {"mode": "USB", "urls": dict(MODES), "tx_ip": None,
+                "tx": {k: False for k in MODES}}
 
 
-def save_cfg(mode: str, urls: dict, tx_ip=None) -> None:
+def save_cfg(mode: str, urls: dict, tx_ip=None, tx=None) -> None:
     try:
         # ponytail: mode 非法就不寫檔，免得 null 蓋掉上次記憶，下次開回預設
         if mode not in MODES:
             return
-        CFG.write_text(json.dumps({"mode": mode, "urls": urls, "tx_ip": tx_ip}, ensure_ascii=False), encoding="utf-8")
+        CFG.write_text(json.dumps({"mode": mode, "urls": urls, "tx_ip": tx_ip,
+                                   "tx": tx or {}}, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
@@ -804,17 +809,22 @@ def main() -> None:
         _ips = [ip for ip, _ in lan_ips()]
         if _ips and _tx_ip not in _ips:
             _tx_ip = None
+    last_rx = cur_mode if cur_mode in RX_MODES else "USB"  # ponytail: 發只有 WebCam 一項，回切收靠這個記住上次
+    tx_modes = {k: bool((cfg.get("tx") or {}).get(k)) for k in MODES}  # ponytail: 每個來源各記轉播勾，切換不互蓋
     layout = [
         [sg.Image(data=BLACK, key="-IMG-")],
-        [sg.Combo(list(MODES), default_value=cur_mode, key="-MODE-", readonly=True,
+        [sg.Button("接收" if cur_mode in RX_MODES else "傳送", key="-DIR-", size=(6, 1),
+                   tooltip="點一下切換收/發"),
+         sg.Combo(list(RX_MODES) if cur_mode in RX_MODES else ["WebCam"],
+                  default_value=cur_mode, key="-MODE-", readonly=True,
                   enable_events=True, size=(14, 1)),
          sg.Input(urls[cur_mode], key="-URL-", size=(40, 1))],
         [sg.Button("連線"), sg.Button("中斷"),
          sg.Button("截圖"), sg.Button("●錄影", key="-REC-"),
          sg.Button("圖庫"), sg.Button("開資料夾"),
-           sg.Checkbox("轉播", default=False, key="-TX-", enable_events=True,
+           sg.Checkbox("轉播", default=tx_modes.get(cur_mode, False), key="-TX-", enable_events=True,
                        tooltip="勾=區網 browser 可開勾選框上的轉播 URL 看")],
-         [sg.Text("USB/WiFi填IP，加碼貼URL；WebCam填0/1；DPO填USB；TDS填IP", key="-STATUS-", size=(60, 1))],
+         [sg.Text("USB/WiFi填IP，加碼貼URL；WebCam填0/1；DPO填USB", key="-STATUS-", size=(60, 1))],
     ]
     window = sg.Window("mCam", layout, finalize=True)
     window.set_icon(str(ICON))  # ponytail: 建構式吃 icon 不會套用(實測)，要事後 set_icon
@@ -844,19 +854,35 @@ def main() -> None:
     fails = 0
     rec_t0, rec_last, rec_name, src_fps = 0.0, -1, "", 20.0
     tx_on = False
+    mirror = False
 
     while True:
         event, values = window.read(timeout=20)
         if event in (sg.WIN_CLOSED, "Exit"):
             break
+        if event == "-DIR-":
+            # ponytail: 收發 combo 內容不同，翻面先存舊欄、帶新記憶；發只有 WebCam 一項
+            urls[cur_mode] = window["-URL-"].get()
+            cur_mode = last_rx if cur_mode not in RX_MODES else "WebCam"
+            window["-MODE-"].update(values=list(RX_MODES) if cur_mode in RX_MODES else ["WebCam"],
+                                    value=cur_mode)
+            window["-DIR-"].update("接收" if cur_mode in RX_MODES else "傳送")
+            window["-URL-"].update(urls[cur_mode])
+            window["-TX-"].update(value=tx_modes.get(cur_mode, False))
+            if cur_mode in TEK_MODES:
+                window["-STATUS-"].update(tek_hint(cur_mode))
+            save_cfg(cur_mode, urls, _tx_ip, tx_modes)
         if event == "-MODE-":
             # ponytail: 離開前先把舊 mode 的手填值存下，切過去帶該 mode 上次的值
             urls[cur_mode] = window["-URL-"].get()
             cur_mode = values["-MODE-"]
+            if cur_mode in RX_MODES:
+                last_rx = cur_mode
             window["-URL-"].update(urls[cur_mode])
+            window["-TX-"].update(value=tx_modes.get(cur_mode, False))
             if cur_mode in TEK_MODES:
                 window["-STATUS-"].update(tek_hint(cur_mode))
-            save_cfg(cur_mode, urls, _tx_ip)
+            save_cfg(cur_mode, urls, _tx_ip, tx_modes)
         if event == "連線":
             tx_stop()
             tx_on = False
@@ -894,13 +920,14 @@ def main() -> None:
                 conn = spec
             cap = open_cap(conn, mode_now)
             fails = 0
+            mirror = mode_now == "WebCam"  # ponytail: 本機鏡頭才鏡像，手機/示波器來的畫面本來就是正的
             # ponytail: 示波器幾秒一張，錄影 fps 寫 2.0/1.0 就夠，不猜 server fps
             src_fps = {"DPO2014B": 2.0, "TDS3014B": 1.0}.get(
                 mode_now, 20.0 if conn.strip().isdigit() else server_fps(conn))
             if cap.isOpened():
                 # ponytail: 連線成功才記住，下次開啟預帶上次記憶值
                 urls[mode_now] = spec
-                save_cfg(mode_now, urls, _tx_ip)
+                save_cfg(mode_now, urls, _tx_ip, tx_modes)
                 window["-STATUS-"].update("連線中...")
             elif mode_now in TEK_MODES:
                 # ponytail: 示波器開不起來多半是 VISA/驅動層(看得到打不開)，直接秀原因；重插 USB/重開示波器多半就好
@@ -916,11 +943,14 @@ def main() -> None:
                     window["-STATUS-"].update(f"已連線+轉播中 {tx_url()}")
                 else:
                     window["-TX-"].update(value=False)
+                    tx_modes[mode_now] = False
+                    save_cfg(mode_now, urls, _tx_ip, tx_modes)
                     tx_hide()
                     window["-STATUS-"].update(f"已連線但轉播失敗：port {TX_PORT} 被佔用")
         elif event == "中斷":
             tx_stop()
             tx_on = False
+            mirror = False
             tx_hide()
             if cap is not None:
                 cap.release()
@@ -928,7 +958,9 @@ def main() -> None:
             set_black(window, "已斷線")
             window["-STATUS-"].update("已中斷")
         elif event == "-TX-":
-            # ponytail: 勾=有畫面就即開 serve，沒連線就等連線時開；取消勾即停
+            # ponytail: 勾=有畫面就即開 serve，沒連線就等連線時開；取消勾即停；各來源分開記
+            tx_modes[cur_mode] = bool(values.get("-TX-"))
+            save_cfg(cur_mode, urls, _tx_ip, tx_modes)
             if values.get("-TX-"):
                 if cap is not None and cap.isOpened():
                     pick_tx_ip()  # ponytail: 單網卡靜默，多張跳選單；記住的還在就不打擾
@@ -938,6 +970,8 @@ def main() -> None:
                         window["-STATUS-"].update(f"轉播中 {tx_url()}")
                     else:
                         window["-TX-"].update(value=False)
+                        tx_modes[cur_mode] = False
+                        save_cfg(cur_mode, urls, _tx_ip, tx_modes)
                         tx_hide()
                         window["-STATUS-"].update(f"轉播失敗：port {TX_PORT} 被佔用")
                 else:
@@ -981,6 +1015,8 @@ def main() -> None:
                 ok, frame = False, None  # ponytail: read 中 release 會丟 C++ 例外，當斷幀走重連
             now = time.monotonic()
             if ok:
+                if mirror:
+                    frame = cv2.flip(frame, 1)  # ponytail: 本機鏡頭照鏡子，右手不再跑到左邊；轉播/錄影跟著正
                 fails = 0
                 set_black(window, None)  # ponytail: 有幀就藏灰字，不重刷圖免閃
                 if tx_on:
@@ -1023,7 +1059,7 @@ def main() -> None:
     try:
         # ponytail: 用 cur_mode 變數存檔，不用 widget .get()(曾回傳 None 寫壞 mode)
         urls[cur_mode] = window["-URL-"].get()
-        save_cfg(cur_mode, urls, _tx_ip)
+        save_cfg(cur_mode, urls, _tx_ip, tx_modes)
     except Exception:
         pass
     window.close()
