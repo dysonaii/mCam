@@ -75,6 +75,9 @@ def load_cfg() -> dict:
 
 def save_cfg(mode: str, urls: dict, tx_ip=None) -> None:
     try:
+        # ponytail: mode 非法就不寫檔，免得 null 蓋掉上次記憶，下次開回預設
+        if mode not in MODES:
+            return
         CFG.write_text(json.dumps({"mode": mode, "urls": urls, "tx_ip": tx_ip}, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
@@ -1008,7 +1011,7 @@ def main() -> None:
                     fails = 0
                     set_black(window, "已斷線")  # ponytail: 斷線先黑屏，有幀回來自動蓋掉
                     spec_now = window["-URL-"].get()
-                    mode_now = window["-MODE-"].get()
+                    mode_now = cur_mode
                     ok_now = (spec_now.strip().isdigit() or tek_probe(spec_now, mode_now)
                               if mode_now in TEK_MODES else
                               (spec_now.strip().isdigit() or server_ok(spec_now)))
@@ -1028,9 +1031,10 @@ def main() -> None:
     if cap is not None:
         cap.release()
     try:
-        if window["-MODE-"].get() != "WiFi 傳送端":
+        # ponytail: 用 cur_mode 變數存檔，不用 widget .get()(曾回傳 None 寫壞 mode)
+        if cur_mode != "WiFi 傳送端":
             urls[cur_mode] = window["-URL-"].get()
-        save_cfg(window["-MODE-"].get(), urls, _tx_ip)
+        save_cfg(cur_mode, urls, _tx_ip)
     except Exception:
         pass
     window.close()
