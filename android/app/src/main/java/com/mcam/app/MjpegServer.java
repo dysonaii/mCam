@@ -9,7 +9,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
-// ponytail: 手刻 ServerSocket MJPEG，不引 NanoHTTPD；路由只有 /v /s /i，WiFi 自加 1~6 碼、USB 空碼
+// ponytail: 手刻 ServerSocket MJPEG，不引 NanoHTTPD；路由只有 /v /s /i，碼不對即 404
 public class MjpegServer {
     private static final String BOUNDARY = "frame";
     private final int port;
@@ -20,6 +20,7 @@ public class MjpegServer {
     private volatile boolean running;
     private volatile boolean frozen;
     private volatile byte[] frozenJpeg;
+    private volatile String code = "";  // ponytail: 傳送自加碼，空=空碼；碼是門禁，接收打錯即 404
 
     public MjpegServer(int port) {
         this.port = port;
@@ -65,17 +66,21 @@ public class MjpegServer {
         return frozenJpeg;
     }
 
-    // ponytail: /v 空碼或自加 1~6 碼都放行，7 碼以上當沒這頁
-    static boolean isVideo(String path) {
-        return path.equals("/v") || path.matches("/v/\\d{1,6}");
+    public void setCode(String c) {
+        code = (c != null && c.matches("\\d{1,6}")) ? c : "";
     }
 
-    static boolean isSnap(String path) {
-        return path.equals("/s") || path.matches("/s/\\d{1,6}");
+    // ponytail: 碼必須對上才放行（空碼配空碼、有碼配同碼），不對即 404
+    boolean isVideo(String path) {
+        return path.equals(code.isEmpty() ? "/v" : "/v/" + code);
     }
 
-    static boolean isInfo(String path) {
-        return path.equals("/i") || path.matches("/i/\\d{1,6}");
+    boolean isSnap(String path) {
+        return path.equals(code.isEmpty() ? "/s" : "/s/" + code);
+    }
+
+    boolean isInfo(String path) {
+        return path.equals(code.isEmpty() ? "/i" : "/i/" + code);
     }
 
     public int getFrameW() {

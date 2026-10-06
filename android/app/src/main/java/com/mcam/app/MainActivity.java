@@ -86,10 +86,10 @@ public class MainActivity extends ComponentActivity {
         wifiRecv = prefs.getBoolean("wifi_recv", false);
         wifiRecvUrl = prefs.getString("wifi_recv_url", null);
         wifiSendUrl = prefs.getString("wifi_send_url", null);
-        usbStatus.setOnClickListener(v -> copyUrl(usbUrl));
+        usbStatus.setOnClickListener(v -> editSendCode(usbUrl));  // ponytail: USB 跟 WiFi 同一組碼，點哪行都是改碼+複製該行
         wifiStatus.setOnClickListener(v -> {
             if (wifiRecv) editRecvUrl();
-            else editSendCode();  // ponytail: 傳送模式點 WiFi 行=改自家碼，存了顯示即真相
+            else editSendCode(wifiUrl);  // ponytail: 傳送模式點 WiFi 行=改自家碼，存了顯示即真相
         });
         wifiModeBtn = findViewById(R.id.wifiModeBtn);
         wifiModeBtn.setOnClickListener(v -> toggleWifiMode());
@@ -135,7 +135,9 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void refreshStatus() {
-        usbUrl = "http://192.168.42.129:8080/v";
+        String sc = prefs.getString("wifi_send_code", "");
+        String suffix = (sc != null && sc.matches("\\d{1,6}")) ? "/" + sc : "";
+        usbUrl = "http://192.168.42.129:8080/v" + suffix;  // ponytail: USB 跟 WiFi 同一組碼，碼不對 server 照 404
         usbStatus.setText("USB:"+usbUrl);
         wifiModeBtn.setText(wifiRecv ? "WiFi 接收" : "WiFi 傳送");
         if (wifiRecv) {
@@ -144,8 +146,6 @@ public class MainActivity extends ComponentActivity {
         }
         String w = wifiIp();
         if (w != null) {
-            String code = prefs.getString("wifi_send_code", "");
-            String suffix = (code != null && code.matches("\\d{1,6}")) ? "/" + code : "";
             wifiUrl = "http://" + w + ":8080/v" + suffix;
             // ponytail: 記住最後一次抓到的傳送 ip，切去接收再回來沒 WiFi 時還能顯示原來的
             wifiSendUrl = wifiUrl;
@@ -241,6 +241,7 @@ public class MainActivity extends ComponentActivity {
     private boolean ensureServer() {
         if (wifiRecv) return false;
         if (server == null) server = new MjpegServer(PORT);
+        server.setCode(prefs.getString("wifi_send_code", ""));  // ponytail: 碼是門禁，開播即按碼放行
         try {
             server.start();
             return true;
@@ -322,11 +323,20 @@ public class MainActivity extends ComponentActivity {
                     }
                     int e = findJpegEnd(buf, s, n);
                     if (e > 0) {
-                        final android.graphics.Bitmap bm =
+                        // ponytail: 緊鄰下一幀已完整才丟舊的、播最新；沒攢出整幀就照播，跟得上不跳、跟不上跳整幀
+                        boolean newer = false;
+                        for (int i = e; i + 1 < n; i++) {
+                            if (buf[i] == (byte) 0xFF && buf[i + 1] == (byte) 0xD8) {
+                                newer = findJpegEnd(buf, i, n) > 0;
+                                break;
+                            }
+                        }
+                        final android.graphics.Bitmap bm = newer ? null :
                                 android.graphics.BitmapFactory.decodeByteArray(buf, s, e - s);
                         int rest = n - e;
                         System.arraycopy(buf, e, buf, 0, rest);
                         n = rest;
+                        if (newer) continue;
                         if (bm != null) runOnUiThread(() -> {
                             recvView.setImageBitmap(bm);
                             hint.setVisibility(View.GONE);
@@ -370,8 +380,8 @@ public class MainActivity extends ComponentActivity {
         return -1;
     }
 
-    // ponytail: 傳送端點 WiFi 行=改自家碼(空=空碼)；顯示即真相，server 空碼/1~6碼本來就全放行
-    private void editSendCode() {
+    // ponytail: 傳送端點 WiFi/USB 行都是改自家碼(空=空碼)；顯示即真相，server 空碼/1~6碼按碼放行
+    private void editSendCode(String copyUrl) {
         EditText et = new EditText(this);
         et.setSingleLine();
         et.setHint("留空=空碼，或 1~6 碼");
@@ -387,9 +397,10 @@ public class MainActivity extends ComponentActivity {
                         return;
                     }
                     prefs.edit().putString("wifi_send_code", t).apply();
+                    if (server != null) server.setCode(t);  // ponytail: 改碼即時生效，不用重開播
                     refreshStatus();
                 })
-                .setNeutralButton("複製URL", (d, w) -> copyUrl(wifiUrl))
+                .setNeutralButton("複製URL", (d, w) -> copyUrl(copyUrl))
                 .setNegativeButton("取消", null)
                 .show();
     }

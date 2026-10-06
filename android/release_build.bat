@@ -3,6 +3,22 @@ rem mCam release build: auto-creates keystore on first run (local only, gitignor
 setlocal
 cd /d %~dp0
 
+rem ponytail: local.properties 不進版控(路徑每台不同)，缺了就從常見位置自動補，預設安裝換 PC 不用手建
+if not exist local.properties (
+  set "SDK="
+  if defined ANDROID_HOME if exist "%ANDROID_HOME%\platforms" set "SDK=%ANDROID_HOME%"
+  if not defined SDK if defined ANDROID_SDK_ROOT if exist "%ANDROID_SDK_ROOT%\platforms" set "SDK=%ANDROID_SDK_ROOT%"
+  if not defined SDK if exist "%LOCALAPPDATA%\Android\Sdk\platforms" set "SDK=%LOCALAPPDATA%\Android\Sdk"
+  if not defined SDK if exist "C:\Android\Sdk\platforms" set "SDK=C:\Android\Sdk"
+  if defined SDK (
+    setlocal EnableDelayedExpansion
+    echo sdk.dir=!SDK:\=/!> local.properties
+    endlocal
+    echo [0/3] SDK auto-detected, wrote local.properties
+  )
+)
+if not exist local.properties echo [ERR] Android SDK not found. Set ANDROID_HOME or install SDK to %%LOCALAPPDATA%%\Android\Sdk. && exit /b 1
+
 rem ponytail: 新版 Studio 的 jbr 常剩 runtime（沒 javac/keytool），優先拿 Gradle 自動裝的 toolchain JDK（有 javac 才算數）
 set "JDK="
 if defined JAVA_HOME if exist "%JAVA_HOME%\bin\javac.exe" set "JDK=%JAVA_HOME%"
