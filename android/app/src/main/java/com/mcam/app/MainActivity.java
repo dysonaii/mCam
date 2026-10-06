@@ -281,7 +281,7 @@ public class MainActivity extends ComponentActivity {
     private void recvLoop(String url) {
         Thread me = Thread.currentThread();
         boolean told = false;
-        byte[] buf = new byte[1 << 20];
+        byte[] buf = new byte[8 << 20];
         byte[] chunk = new byte[8192];
         while (recvThread == me) {
             java.net.HttpURLConnection c = null;
@@ -309,7 +309,7 @@ public class MainActivity extends ComponentActivity {
                 while (recvThread == me) {
                     int r = in.read(chunk);
                     if (r < 0) break;
-                    if (n + r > buf.length) n = 0;  // ponytail: 單幀不可能 1MB，爆了就丟掉重攢
+                    if (n + r > buf.length) n = 0;  // ponytail: 單幀不可能 8MB，爆了就丟掉重攢
                     System.arraycopy(chunk, 0, buf, n, r);
                     n += r;
                     // ponytail: 解碼必須從 SOI 起跳，multipart 檔頭餵進去 BitmapFactory 直接回 null 全黑

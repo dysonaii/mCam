@@ -1,4 +1,4 @@
-"""mCam PC 端 — 預覽+截圖+錄影 (手機USB共享 + USB webcam + WiFi傳送給手機)."""
+"""mCam PC 端 — 預覽+截圖+錄影 (手機USB共享 + WebCam + 轉播給手機)."""
 import ctypes
 import json
 import re
@@ -18,10 +18,9 @@ import numpy as np
 import PySimpleGUI as sg
 
 MODES = {
-    "USB 共享": "http://192.168.42.129:8080/v",
-    "WiFi 接收端": "http://192.168.1.100:8080/v",
-    "WiFi 傳送端": "0",
-    "USB webcam": "0",
+    "USB": "http://192.168.42.129:8080/v",
+    "WiFi": "http://192.168.1.100:8080/v",
+    "WebCam": "0",
     "DPO2014B": "USB",
     #"TDS3014B": "192.168.1.60",
 }
@@ -56,13 +55,15 @@ def set_black(window, msg: str | None) -> None:
 
 def load_cfg() -> dict:
     # ponytail: 每個 mode 各記一組 url，切換不丟；舊檔只有 url 就當該 mode 的，壞檔回預設
-    # ponytail: 舊名 USB共享/WiFi/WiFi傳送順手搬到新名，免得改名吃掉使用者存的 IP
-    _rename = {"USB共享": "USB 共享", "WiFi": "WiFi 接收端", "WiFi傳送": "WiFi 傳送端"}
+    # ponytail: 新名 USB/WiFi/WebCam，舊檔所有寫法順手搬家，免得改名吃掉存的 IP
+    _rename = {"USB共享": "USB", "USB 共享": "USB", "WiFi": "WiFi",
+               "WiFi 接收端": "WiFi", "WiFi傳送": "WebCam", "WiFi 傳送端": "WebCam",
+               "USB webcam": "WebCam"}
     try:
         d = json.loads(CFG.read_text(encoding="utf-8"))
-        m = d.get("mode", "USB 共享")
+        m = d.get("mode", "USB")
         m = _rename.get(m, m)
-        m = m if m in MODES else "USB 共享"
+        m = m if m in MODES else "USB"
         urls = dict(MODES)
         saved = {_rename.get(k, k): v for k, v in (d.get("urls") or {}).items() if _rename.get(k, k) in MODES and v}
         urls.update(saved)
@@ -70,7 +71,7 @@ def load_cfg() -> dict:
             urls[m] = d["url"]
         return {"mode": m, "urls": urls, "tx_ip": d.get("tx_ip")}
     except Exception:
-        return {"mode": "USB 共享", "urls": dict(MODES), "tx_ip": None}
+        return {"mode": "USB", "urls": dict(MODES), "tx_ip": None}
 
 
 def save_cfg(mode: str, urls: dict, tx_ip=None) -> None:
@@ -340,7 +341,7 @@ _tx_ip: str | None = None
 
 
 def lan_ips() -> list:
-    # ponytail: 傳送選單用，(ip, 網卡名) 照私網優先排；powershell 掛了回空，外面退回自動
+    # ponytail: 轉播選單用，(ip, 網卡名) 照私網優先排；powershell 掛了回空，外面退回自動
     try:
         ps = ("Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object {"
               " $d=$_.InterfaceDescription; $i=$_.ifIndex;"
@@ -373,11 +374,11 @@ def pick_tx_ip(force: bool = False) -> str | None:
         cands = [(pc_ip(), "本機(IP 列表抓不到)")]
     opts = [f"{desc} — {ip}" for ip, desc in cands]
     cur = [o for o in opts if _tx_ip and o.endswith(_tx_ip)]
-    lay = [[sg.Text("傳送用哪個 IP？(手機跟這台同網才連得到)")],
+    lay = [[sg.Text("轉播用哪個 IP？(手機跟這台同網才連得到)")],
            [sg.Listbox(opts, size=(56, min(len(opts), 6)), key="-IP-",
                        default_values=cur or opts[:1])],
            [sg.Button("確定"), sg.Button("自動"), sg.Button("取消")]]
-    w = sg.Window("選擇傳送 IP", lay, modal=True, finalize=True)
+    w = sg.Window("選擇轉播 IP", lay, modal=True, finalize=True)
     while True:
         ev, vals = w.read()
         if ev in (sg.WIN_CLOSED, "取消"):
@@ -394,7 +395,7 @@ def pick_tx_ip(force: bool = False) -> str | None:
 
 
 def tx_url() -> str:
-    # ponytail: 傳送端欄位顯示的是「手機要填的 URL」，真正的 cam index 另存 urls，不混一起
+    # ponytail: 轉播勾上顯示的「手機要填的 URL」，寫在 checkbox 本體上
     return f"http://{_tx_ip or pc_ip()}:{TX_PORT}/v"
 
 
@@ -527,7 +528,7 @@ def pick_reachable(spec: str, mode: str) -> str | None:
     if mode in TEK_MODES:
         return spec if tek_probe(spec, mode) else None
     cands = [spec]
-    if mode == "USB 共享":
+    if mode == "USB":
         gw = rndis_gateway()
         if gw and f"http://{gw}:" not in spec:
             cands.append(f"http://{gw}:8080/v")
@@ -807,13 +808,13 @@ def main() -> None:
         [sg.Image(data=BLACK, key="-IMG-")],
         [sg.Combo(list(MODES), default_value=cur_mode, key="-MODE-", readonly=True,
                   enable_events=True, size=(14, 1)),
-         sg.Input(tx_url() if cur_mode == "WiFi 傳送端" else urls[cur_mode], key="-URL-", size=(40, 1))],
+         sg.Input(urls[cur_mode], key="-URL-", size=(40, 1))],
         [sg.Button("連線"), sg.Button("中斷"),
          sg.Button("截圖"), sg.Button("●錄影", key="-REC-"),
          sg.Button("圖庫"), sg.Button("開資料夾"),
-          sg.Checkbox("轉播", default=False, key="-TX-", enable_events=True,
-                      tooltip="勾=區網 browser 可開勾選框上的轉播 URL 看")],
-         [sg.Text("USB/WiFi填IP，加碼貼URL；傳送填0/1；DPO填USB；TDS填IP", key="-STATUS-", size=(60, 1))],
+           sg.Checkbox("轉播", default=False, key="-TX-", enable_events=True,
+                       tooltip="勾=區網 browser 可開勾選框上的轉播 URL 看")],
+         [sg.Text("USB/WiFi填IP，加碼貼URL；WebCam填0/1；DPO填USB；TDS填IP", key="-STATUS-", size=(60, 1))],
     ]
     window = sg.Window("mCam", layout, finalize=True)
     window.set_icon(str(ICON))  # ponytail: 建構式吃 icon 不會套用(實測)，要事後 set_icon
@@ -850,13 +851,9 @@ def main() -> None:
             break
         if event == "-MODE-":
             # ponytail: 離開前先把舊 mode 的手填值存下，切過去帶該 mode 上次的值
-            # ponytail: 傳送端欄位是顯示用 URL 不存；切進傳送端自動帶本機 wifi IP
-            if cur_mode != "WiFi 傳送端":
-                urls[cur_mode] = window["-URL-"].get()
+            urls[cur_mode] = window["-URL-"].get()
             cur_mode = values["-MODE-"]
-            if cur_mode == "WiFi 傳送端":
-                pick_tx_ip()  # ponytail: 單網卡靜默，多張才跳選單；上次選的還在就不打擾
-            window["-URL-"].update(tx_url() if cur_mode == "WiFi 傳送端" else urls[cur_mode])
+            window["-URL-"].update(urls[cur_mode])
             if cur_mode in TEK_MODES:
                 window["-STATUS-"].update(tek_hint(cur_mode))
             save_cfg(cur_mode, urls, _tx_ip)
@@ -869,17 +866,7 @@ def main() -> None:
                 cap = None
             spec = window["-URL-"].get()
             mode_now = values["-MODE-"]
-            if mode_now == "WiFi 傳送端":
-                # ponytail: 欄位是顯示用 URL，手填 0/1 才當 cam index 收下；傳送端永不探測，壞值回 0
-                # ponytail: 框被清空也算 IP 為空(框≠_tx_ip，清框不清變數)，必跳選單
-                if not _tx_ip or not window["-URL-"].get().strip():
-                    pick_tx_ip(force=True)  # ponytail: IP 為空按連線必跳選單，選完記住，下次預帶
-                    window["-URL-"].update(tx_url())
-                typed = window["-URL-"].get().strip()
-                spec = typed if typed.isdigit() else urls.get("WiFi 傳送端", "0")
-                if not spec.strip().isdigit():
-                    spec = "0"
-            elif mode_now == "WiFi 接收端" and not tek_ip(spec):
+            if mode_now == "WiFi" and not tek_ip(spec):
                 hit_ip = ask_rx_url(spec or urls.get(mode_now, ""))
                 if not hit_ip:
                     window["-STATUS-"].update("未填 IP，已取消連線")
@@ -897,7 +884,7 @@ def main() -> None:
                         msg = "連不上：TDS的IP對嗎？同網段嗎？(Utility>I/O 看)"
                     else:
                         msg = ("連不上：USB共享開了嗎？手機 App 在前景？"
-                               if mode_now == "USB 共享" else
+                               if mode_now == "USB" else
                                "連不上：手機 App 在前景？WiFi 填IP或貼URL(加碼才加)")
                     window["-STATUS-"].update(msg)
                     set_black(window, "已斷線")
@@ -912,9 +899,8 @@ def main() -> None:
                 mode_now, 20.0 if conn.strip().isdigit() else server_fps(conn))
             if cap.isOpened():
                 # ponytail: 連線成功才記住，下次開啟預帶上次記憶值
-                if values["-MODE-"] != "WiFi 傳送端" or spec.strip().isdigit():
-                    urls[values["-MODE-"]] = spec
-                    save_cfg(values["-MODE-"], urls, _tx_ip)
+                urls[mode_now] = spec
+                save_cfg(mode_now, urls, _tx_ip)
                 window["-STATUS-"].update("連線中...")
             elif mode_now in TEK_MODES:
                 # ponytail: 示波器開不起來多半是 VISA/驅動層(看得到打不開)，直接秀原因；重插 USB/重開示波器多半就好
@@ -923,11 +909,13 @@ def main() -> None:
                 window["-STATUS-"].update("連不上：webcam被佔用？換 0/1 試試")
             if cap.isOpened() and values.get("-TX-"):
                 # ponytail: 勾轉播=任何來源都 serve，區網 browser 開勾選框上的 URL 即看
+                pick_tx_ip()  # ponytail: 單網卡靜默，多張跳選單；記住的還在就不打擾
                 if tx_start(src_fps):
                     tx_on = True
                     tx_show()
                     window["-STATUS-"].update(f"已連線+轉播中 {tx_url()}")
                 else:
+                    window["-TX-"].update(value=False)
                     tx_hide()
                     window["-STATUS-"].update(f"已連線但轉播失敗：port {TX_PORT} 被佔用")
         elif event == "中斷":
@@ -943,11 +931,13 @@ def main() -> None:
             # ponytail: 勾=有畫面就即開 serve，沒連線就等連線時開；取消勾即停
             if values.get("-TX-"):
                 if cap is not None and cap.isOpened():
+                    pick_tx_ip()  # ponytail: 單網卡靜默，多張跳選單；記住的還在就不打擾
                     if tx_start(src_fps):
                         tx_on = True
                         tx_show()
                         window["-STATUS-"].update(f"轉播中 {tx_url()}")
                     else:
+                        window["-TX-"].update(value=False)
                         tx_hide()
                         window["-STATUS-"].update(f"轉播失敗：port {TX_PORT} 被佔用")
                 else:
@@ -1032,8 +1022,7 @@ def main() -> None:
         cap.release()
     try:
         # ponytail: 用 cur_mode 變數存檔，不用 widget .get()(曾回傳 None 寫壞 mode)
-        if cur_mode != "WiFi 傳送端":
-            urls[cur_mode] = window["-URL-"].get()
+        urls[cur_mode] = window["-URL-"].get()
         save_cfg(cur_mode, urls, _tx_ip)
     except Exception:
         pass
