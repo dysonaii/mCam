@@ -710,7 +710,7 @@ def main() -> None:
          sg.Input(tx_url() if cur_mode == "WiFi 傳送端" else urls[cur_mode], key="-URL-", size=(40, 1))],
         [sg.Button("連線"), sg.Button("中斷"),
          sg.Button("截圖"), sg.Button("●錄影", key="-REC-"),
-         sg.Button("圖庫"), sg.Button("資料夾"),
+         sg.Button("圖庫"), sg.Button("開資料夾"),
          sg.Checkbox("轉播", default=False, key="-TX-", enable_events=True,
                      tooltip="勾=區網 browser 可開 http://本機IP:8080/video 看")],
         [sg.Text("USB /WiFi 填IP；webcam/傳送填0/1；DPO填USB；TDS填示波器IP", key="-STATUS-", size=(60, 1))],
