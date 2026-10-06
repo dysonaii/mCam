@@ -9,7 +9,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
-// ponytail: 手刻 ServerSocket MJPEG，不引 NanoHTTPD；只夠 /video /snapshot /info
+// ponytail: 手刻 ServerSocket MJPEG，不引 NanoHTTPD；路由只有 /v /s /i，WiFi 自加 1~6 碼、USB 空碼
 public class MjpegServer {
     private static final String BOUNDARY = "frame";
     private final int port;
@@ -26,6 +26,7 @@ public class MjpegServer {
     }
 
     public void start() throws IOException {
+        if (running) return;  // ponytail: 轉向接回已跑的 server，重複 start 直接過
         server = new ServerSocket(port);
         running = true;
         new Thread(this::acceptLoop, "mjpeg-accept").start();
@@ -64,6 +65,27 @@ public class MjpegServer {
         return frozenJpeg;
     }
 
+    // ponytail: /v 空碼或自加 1~6 碼都放行，7 碼以上當沒這頁
+    static boolean isVideo(String path) {
+        return path.equals("/v") || path.matches("/v/\\d{1,6}");
+    }
+
+    static boolean isSnap(String path) {
+        return path.equals("/s") || path.matches("/s/\\d{1,6}");
+    }
+
+    static boolean isInfo(String path) {
+        return path.equals("/i") || path.matches("/i/\\d{1,6}");
+    }
+
+    public int getFrameW() {
+        return frameW;
+    }
+
+    public int getFrameH() {
+        return frameH;
+    }
+
     private void acceptLoop() {
         while (running) {
             try {
@@ -84,11 +106,11 @@ public class MjpegServer {
             String[] parts = line.split(" ");
             String path = parts.length > 1 ? parts[1] : "/";
             OutputStream out = socket.getOutputStream();
-            if (path.startsWith("/video")) {
+            if (isVideo(path)) {
                 streamVideo(out);
-            } else if (path.startsWith("/snapshot")) {
+            } else if (isSnap(path)) {
                 sendSnapshot(out);
-            } else if (path.startsWith("/info")) {
+            } else if (isInfo(path)) {
                 byte[] body = String.format(Locale.US,
                         "{\"w\":%d,\"h\":%d,\"fps\":15,\"facing\":\"back\",\"ver\":1}",
                         frameW, frameH).getBytes(StandardCharsets.UTF_8);

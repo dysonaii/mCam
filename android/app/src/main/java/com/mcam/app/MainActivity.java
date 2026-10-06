@@ -60,10 +60,17 @@ public class MainActivity extends ComponentActivity {
     private Preview previewUseCase;
     private ImageAnalysis analysisUseCase;
     private boolean previewOn = true;
+    // ponytail: 轉向 Activity 重建，同進程用 static 接住狀態；真離開(isFinishing)才清
+    private static boolean keptPreviewOn = true;
+    private static boolean keptFrozen = false;
+    private static byte[] keptJpeg = null;
+    private static int keptW, keptH;
     private String usbUrl;
     private String wifiUrl;
     private String wifiRecvUrl;
     private String wifiSendUrl;
+    // ponytail: 轉向重建同進程，server 不停播不斷流；真離開才停
+    private static MjpegServer keptServer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -82,7 +89,7 @@ public class MainActivity extends ComponentActivity {
         usbStatus.setOnClickListener(v -> copyUrl(usbUrl));
         wifiStatus.setOnClickListener(v -> {
             if (wifiRecv) editRecvUrl();
-            else copyUrl(wifiUrl);
+            else editSendCode();  // ponytail: 傳送模式點 WiFi 行=改自家碼，存了顯示即真相
         });
         wifiModeBtn = findViewById(R.id.wifiModeBtn);
         wifiModeBtn.setOnClickListener(v -> toggleWifiMode());
@@ -93,6 +100,8 @@ public class MainActivity extends ComponentActivity {
         findViewById(R.id.tetherBtn).setOnClickListener(v -> openTetherSettings());
 
         cameraIo = Executors.newSingleThreadExecutor();
+        if (server == null) server = keptServer;  // ponytail: 轉向接回舊 server，PC 不斷線
+        previewOn = keptPreviewOn;  // ponytail: 轉向前關了預覽，重建不自動開
         refreshStatus();
         applyMode();  // ponytail: 傳送才開 server；接收不開，不留凍結幀害 PC 的 cap.read 卡死
 
@@ -126,7 +135,7 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void refreshStatus() {
-        usbUrl = "http://192.168.42.129:8080/video";
+        usbUrl = "http://192.168.42.129:8080/v";
         usbStatus.setText("USB:"+usbUrl);
         wifiModeBtn.setText(wifiRecv ? "WiFi 接收" : "WiFi 傳送");
         if (wifiRecv) {
@@ -135,12 +144,16 @@ public class MainActivity extends ComponentActivity {
         }
         String w = wifiIp();
         if (w != null) {
-            wifiUrl = "http://" + w + ":8080/video";
+            String code = prefs.getString("wifi_send_code", "");
+            String suffix = (code != null && code.matches("\\d{1,6}")) ? "/" + code : "";
+            wifiUrl = "http://" + w + ":8080/v" + suffix;
             // ponytail: 記住最後一次抓到的傳送 ip，切去接收再回來沒 WiFi 時還能顯示原來的
             wifiSendUrl = wifiUrl;
             prefs.edit().putString("wifi_send_url", wifiSendUrl).apply();
         } else {
-            wifiUrl = wifiSendUrl;
+            // ponytail: 存的可能是別台殘留，只取 host 重組
+            String hip = ipOf(wifiSendUrl);
+            wifiUrl = hip != null ? "http://" + hip + ":8080/v" : null;
         }
         wifiStatus.setText(wifiUrl != null ? "WiFi:"+wifiUrl : "WiFi:行動網路不能直連");
     }
@@ -166,6 +179,8 @@ public class MainActivity extends ComponentActivity {
                 freezeBtn.setText("凍結");
                 freezeBtn.setEnabled(false);
             }
+            keptFrozen = false;  // ponytail: 接收模式本來就不能凍，殘留一併清
+            keptJpeg = null;
             previewView.setVisibility(View.INVISIBLE);
             recvView.setImageBitmap(null);
             recvView.setVisibility(View.VISIBLE);
@@ -186,6 +201,19 @@ public class MainActivity extends ComponentActivity {
             syncHint();
             if (!ensureServer()) {
                 wifiStatus.setText("port 8080 開不起來");
+            } else if (keptFrozen && keptJpeg != null) {
+                // ponytail: 轉向前凍著，重建把舊幀灌回新 server 繼續凍，PC 不閃一下活的
+                server.pushFrame(keptJpeg, keptW, keptH);
+                server.setFrozen(true);
+                frozen = true;
+                freezeBtn.setText("解凍");
+                if (!showFrozen(keptJpeg)) {
+                    frozen = false;
+                    keptFrozen = false;
+                    keptJpeg = null;
+                    server.setFrozen(false);
+                    freezeBtn.setText("凍結");
+                }
             }
             if (provider != null && previewUseCase != null && analysisUseCase != null) {
                 try {
@@ -207,6 +235,7 @@ public class MainActivity extends ComponentActivity {
             server.stop();
             server = null;
         }
+        keptServer = null;
     }
 
     private boolean ensureServer() {
@@ -260,6 +289,21 @@ public class MainActivity extends ComponentActivity {
                 c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
                 c.setConnectTimeout(3000);
                 c.setReadTimeout(5000);
+                int code = c.getResponseCode();
+                if (code != 200) {
+                    if (!told) {
+                        told = true;
+                        final int fc = code;
+                        runOnUiThread(() -> Toast.makeText(this,
+                                "HTTP " + fc + "：路徑不對，IP/碼重打", Toast.LENGTH_SHORT).show());
+                    }
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    continue;
+                }
                 java.io.InputStream in = c.getInputStream();
                 int n = 0;
                 while (recvThread == me) {
@@ -288,6 +332,11 @@ public class MainActivity extends ComponentActivity {
                             hint.setVisibility(View.GONE);
                         });
                     }
+                }
+            } catch (java.net.SocketTimeoutException e) {
+                if (!told) {
+                    told = true;
+                    runOnUiThread(() -> Toast.makeText(this, "連線逾時：IP 錯或防火牆擋了", Toast.LENGTH_SHORT).show());
                 }
             } catch (Exception e) {
                 if (!told) {
@@ -321,29 +370,77 @@ public class MainActivity extends ComponentActivity {
         return -1;
     }
 
-    // ponytail: 接收模式只輸 IP 就夠，前後綴自動補；貼整串 url 也照取 IP，SharedPreferences 仍存整串
+    // ponytail: 傳送端點 WiFi 行=改自家碼(空=空碼)；顯示即真相，server 空碼/1~6碼本來就全放行
+    private void editSendCode() {
+        EditText et = new EditText(this);
+        et.setSingleLine();
+        et.setHint("留空=空碼，或 1~6 碼");
+        String cur = prefs.getString("wifi_send_code", "");
+        if (cur != null && !cur.isEmpty()) et.setText(cur);
+        new AlertDialog.Builder(this)
+                .setTitle("自家連線碼")
+                .setView(et)
+                .setPositiveButton("儲存", (d, w) -> {
+                    String t = et.getText().toString().trim();
+                    if (!t.isEmpty() && !t.matches("\\d{1,6}")) {
+                        Toast.makeText(this, "只要 1~6 碼，留空=空碼", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    prefs.edit().putString("wifi_send_code", t).apply();
+                    refreshStatus();
+                })
+                .setNeutralButton("複製URL", (d, w) -> copyUrl(wifiUrl))
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    // ponytail: 三種收法：完整 URL 照用 / IP+空格+1~6碼組路徑 / 純 IP 組空碼 /v
     private void editRecvUrl() {
         EditText et = new EditText(this);
         et.setSingleLine();
-        et.setHint("192.168.1.x");
-        String ip = ipOf(wifiRecvUrl);
-        if (ip != null) et.setText(ip);
+        et.setHint("10.35.9.108 140023 或完整 URL");
+        if (wifiRecvUrl != null) et.setText(shortRecv(wifiRecvUrl));
         new AlertDialog.Builder(this)
-                .setTitle("對方 IP")
+                .setTitle("對方連線")
                 .setView(et)
                 .setPositiveButton("儲存", (d, w) -> {
-                    String got = ipOf(et.getText().toString());
-                    if (got == null) {
-                        Toast.makeText(this, "IP 格式不對", Toast.LENGTH_SHORT).show();
+                    String url = recvUrlOf(et.getText().toString().trim());
+                    if (url == null) {
+                        Toast.makeText(this, "格式不對：IP+空格+1~6碼，如 10.35.9.108 140023", Toast.LENGTH_SHORT).show();
                         return;
                     }
-                    wifiRecvUrl = "http://" + got + ":8080/video";
+                    wifiRecvUrl = url;
                     prefs.edit().putString("wifi_recv_url", wifiRecvUrl).apply();
                     refreshStatus();
                     applyMode();
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    // ponytail: 純函式，方便以後單測；回 null=格式不對
+    static String recvUrlOf(String t) {
+        if (t == null) return null;
+        t = t.trim();
+        if (t.startsWith("http://") || t.startsWith("https://")) return t;
+        if (t.contains("/")) return "http://" + t;  // ponytail: 10.35.9.108/v/140023 這種省 scheme 的
+        String[] parts = t.split("\\s+");
+        String got = ipOf(parts[0]);
+        if (got == null) return null;
+        if (parts.length >= 2) {
+            if (!parts[1].matches("\\d{1,6}")) return null;
+            return "http://" + got + ":8080/v/" + parts[1];
+        }
+        return "http://" + got + ":8080/v";
+    }
+
+    // ponytail: 存的是完整 URL，顯示縮回短格式好抄好改
+    static String shortRecv(String url) {
+        if (url == null) return "";
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("http://([\\d.]+):8080/v/(\\d{1,6})").matcher(url.trim());
+        if (m.find()) return m.group(1) + " " + m.group(2);
+        return url;
     }
 
     static String ipOf(String s) {
@@ -422,6 +519,7 @@ public class MainActivity extends ComponentActivity {
     private void togglePreview() {
         if (wifiRecv) return;  // ponytail: 接收模式看的是對方，本地預覽鍵無效
         previewOn = !previewOn;
+        keptPreviewOn = previewOn;
         previewBtn.setText(previewOn ? "關預覽" : "開預覽");
         previewView.setVisibility(previewOn ? View.VISIBLE : View.INVISIBLE);
         syncHint();
@@ -445,19 +543,11 @@ public class MainActivity extends ComponentActivity {
         freezeBtn.setText(frozen ? "解凍" : "凍結");
         if (frozen) {
             byte[] fj = server != null ? server.getFrozenJpeg() : null;
-            if (fj != null) {
-                final android.graphics.Bitmap bm =
-                        android.graphics.BitmapFactory.decodeByteArray(fj, 0, fj.length);
-                if (bm != null) {
-                    recvView.setImageBitmap(bm);
-                    recvView.setVisibility(View.VISIBLE);
-                    previewView.setVisibility(View.INVISIBLE);
-                    hint.setVisibility(View.GONE);
-                } else {
-                    frozen = false;
-                    if (server != null) server.setFrozen(false);
-                    freezeBtn.setText("凍結");
-                }
+            if (fj != null && showFrozen(fj)) {
+                keptFrozen = true;
+                keptJpeg = fj;
+                keptW = server.getFrameW();
+                keptH = server.getFrameH();
             } else {
                 Toast.makeText(this, "還沒畫面，凍不了", Toast.LENGTH_SHORT).show();
                 frozen = false;
@@ -465,11 +555,29 @@ public class MainActivity extends ComponentActivity {
                 freezeBtn.setText("凍結");
             }
         } else {
-            recvView.setImageBitmap(null);
-            recvView.setVisibility(View.GONE);
-            previewView.setVisibility(previewOn ? View.VISIBLE : View.INVISIBLE);
-            syncHint();
+            keptFrozen = false;
+            keptJpeg = null;
+            hideFrozen();
         }
+    }
+
+    // ponytail: 凍結圖顯示抽出來，轉向重建共用；回 false=解不出圖
+    private boolean showFrozen(byte[] fj) {
+        final android.graphics.Bitmap bm =
+                android.graphics.BitmapFactory.decodeByteArray(fj, 0, fj.length);
+        if (bm == null) return false;
+        recvView.setImageBitmap(bm);
+        recvView.setVisibility(View.VISIBLE);
+        previewView.setVisibility(View.INVISIBLE);
+        hint.setVisibility(View.GONE);
+        return true;
+    }
+
+    private void hideFrozen() {
+        recvView.setImageBitmap(null);
+        recvView.setVisibility(View.GONE);
+        previewView.setVisibility(previewOn ? View.VISIBLE : View.INVISIBLE);
+        syncHint();
     }
 
     private void onFrame(ImageProxy proxy) {
@@ -480,7 +588,7 @@ public class MainActivity extends ComponentActivity {
                 int w = img.getWidth(), h = img.getHeight();
                 byte[] nv21 = yuv420ToNv21(img);
                 // ponytail: sensor 橫的，直屏時 rotationDegrees=90；NV21 先轉正再壓 JPEG，
-                // /video /snapshot /info 全都正，PC 不用動
+                // /v /s /i 全都正，PC 不用動
                 int deg = proxy.getImageInfo().getRotationDegrees();
                 if (deg == 90 || deg == 270) {
                     nv21 = rotateNv21(nv21, w, h, deg);
@@ -595,7 +703,15 @@ public class MainActivity extends ComponentActivity {
     protected void onDestroy() {
         super.onDestroy();
         stopRecv();
-        stopServer();
         if (cameraIo != null) cameraIo.shutdown();
+        if (isFinishing()) {  // ponytail: 真離開停播並回預設；轉向重建不清
+            stopServer();
+            keptPreviewOn = true;
+            keptFrozen = false;
+            keptJpeg = null;
+        } else {
+            keptServer = server;  // ponytail: 轉向 server 不停播，PC 不斷線
+            server = null;
+        }
     }
 }
