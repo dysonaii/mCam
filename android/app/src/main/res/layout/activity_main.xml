@@ -41,23 +41,42 @@
         <Button
             android:id="@+id/tetherBtn"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="48dp"
             android:layout_weight="1"
-            android:text="USB 共享" />
+            android:gravity="center"
+            android:maxLines="1"
+            android:text="USB 共享"
+            android:textSize="13sp" />
 
         <Button
             android:id="@+id/wifiModeBtn"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="48dp"
             android:layout_weight="1"
-            android:text="WiFi 傳送" />
+            android:gravity="center"
+            android:maxLines="1"
+            android:text="WiFi 傳送"
+            android:textSize="13sp" />
 
         <Button
             android:id="@+id/previewBtn"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="48dp"
             android:layout_weight="1"
-            android:text="關預覽" />
+            android:gravity="center"
+            android:maxLines="1"
+            android:text="關預覽"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/freezeBtn"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:maxLines="1"
+            android:text="凍結"
+            android:textSize="13sp" />
     </LinearLayout>
 
     <TextView

@@ -244,7 +244,11 @@ def open_cap(spec: str, mode: str = ""):
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         return cap
-    return cv2.VideoCapture(spec)
+    # ponytail: 手機先關會剩半開連線(不斷也不送資料)，ffmpeg 預設等到天荒地老、
+    # UI 卡到中斷都按不了；3s 超時逼 read 回來走斷線重連
+    return cv2.VideoCapture(spec, cv2.CAP_FFMPEG,
+                            [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000,
+                             cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000])
 
 
 def rndis_gateway() -> str | None:
@@ -865,7 +869,10 @@ def main() -> None:
                 window["-STATUS-"].update("錄影已存")
 
         if cap is not None and cap.isOpened():
-            ok, frame = cap.read()
+            try:
+                ok, frame = cap.read()
+            except Exception:
+                ok, frame = False, None  # ponytail: read 中 release 會丟 C++ 例外，當斷幀走重連
             now = time.monotonic()
             if ok:
                 fails = 0

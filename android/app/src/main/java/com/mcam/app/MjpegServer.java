@@ -18,6 +18,8 @@ public class MjpegServer {
     private volatile int frameH;
     private ServerSocket server;
     private volatile boolean running;
+    private volatile boolean frozen;
+    private volatile byte[] frozenJpeg;
 
     public MjpegServer(int port) {
         this.port = port;
@@ -41,6 +43,25 @@ public class MjpegServer {
         latest = jpeg;
         frameW = w;
         frameH = h;
+    }
+
+    // ponytail: 凍結=快照 latest 重發同一幀，PC cap.read 照拿不觸斷線；clone 換 ref 避開去重
+    public void setFrozen(boolean f) {
+        frozen = f;
+        if (f) {
+            byte[] cur = latest;
+            frozenJpeg = cur != null ? cur.clone() : null;
+        } else {
+            frozenJpeg = null;
+        }
+    }
+
+    public boolean isFrozen() {
+        return frozen;
+    }
+
+    public byte[] getFrozenJpeg() {
+        return frozenJpeg;
     }
 
     private void acceptLoop() {
@@ -87,6 +108,16 @@ public class MjpegServer {
                 + BOUNDARY + "\r\nConnection: close\r\n\r\n");
         byte[] lastSent = null;
         while (running) {
+            byte[] fj = frozen ? frozenJpeg : null;
+            if (fj != null) {
+                write(out, "--" + BOUNDARY + "\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                        + fj.length + "\r\n\r\n");
+                out.write(fj);
+                write(out, "\r\n");
+                out.flush();
+                sleep(66);
+                continue;
+            }
             byte[] jpeg = latest;
             if (jpeg == null || jpeg == lastSent) {
                 sleep(66);

@@ -52,6 +52,8 @@ public class MainActivity extends ComponentActivity {
     private TextView wifiStatus;
     private Button previewBtn;
     private Button wifiModeBtn;
+    private Button freezeBtn;
+    private boolean frozen = false;
     private SharedPreferences prefs;
     private boolean wifiRecv = false;
     private ProcessCameraProvider provider;
@@ -86,6 +88,8 @@ public class MainActivity extends ComponentActivity {
         wifiModeBtn.setOnClickListener(v -> toggleWifiMode());
         previewBtn = findViewById(R.id.previewBtn);
         previewBtn.setOnClickListener(v -> togglePreview());
+        freezeBtn = findViewById(R.id.freezeBtn);
+        freezeBtn.setOnClickListener(v -> toggleFreeze());
         findViewById(R.id.tetherBtn).setOnClickListener(v -> openTetherSettings());
 
         cameraIo = Executors.newSingleThreadExecutor();
@@ -124,7 +128,7 @@ public class MainActivity extends ComponentActivity {
     private void refreshStatus() {
         usbUrl = "http://192.168.42.129:8080/video";
         usbStatus.setText("USB:"+usbUrl);
-        wifiModeBtn.setText(wifiRecv ? "WiFi 接收端" : "WiFi 傳送端");
+        wifiModeBtn.setText(wifiRecv ? "WiFi 接收" : "WiFi 傳送");
         if (wifiRecv) {
             wifiStatus.setText(wifiRecvUrl != null ? "WiFi:"+wifiRecvUrl : "WiFi:點此輸入對方 URL");
             return;
@@ -157,13 +161,24 @@ public class MainActivity extends ComponentActivity {
                 if (provider != null) provider.unbindAll();
             } catch (Exception ignored) {
             }
+            frozen = false;
+            if (freezeBtn != null) {
+                freezeBtn.setText("凍結");
+                freezeBtn.setEnabled(false);
+            }
             previewView.setVisibility(View.INVISIBLE);
+            recvView.setImageBitmap(null);
             recvView.setVisibility(View.VISIBLE);
             previewBtn.setEnabled(false);
             syncHint();
             startRecv();
         } else {
             stopRecv();
+            frozen = false;
+            if (freezeBtn != null) {
+                freezeBtn.setText("凍結");
+                freezeBtn.setEnabled(true);
+            }
             recvView.setVisibility(View.GONE);
             recvView.setImageBitmap(null);
             previewBtn.setEnabled(true);
@@ -422,8 +437,44 @@ public class MainActivity extends ComponentActivity {
         }
     }
 
+    // ponytail: 凍結=!wifiRecv 才有效，USB/WiFi 同一 server 同一管線；overlay 重用 recvView，零新增 View
+    private void toggleFreeze() {
+        if (wifiRecv) return;
+        frozen = !frozen;
+        if (server != null) server.setFrozen(frozen);
+        freezeBtn.setText(frozen ? "解凍" : "凍結");
+        if (frozen) {
+            byte[] fj = server != null ? server.getFrozenJpeg() : null;
+            if (fj != null) {
+                final android.graphics.Bitmap bm =
+                        android.graphics.BitmapFactory.decodeByteArray(fj, 0, fj.length);
+                if (bm != null) {
+                    recvView.setImageBitmap(bm);
+                    recvView.setVisibility(View.VISIBLE);
+                    previewView.setVisibility(View.INVISIBLE);
+                    hint.setVisibility(View.GONE);
+                } else {
+                    frozen = false;
+                    if (server != null) server.setFrozen(false);
+                    freezeBtn.setText("凍結");
+                }
+            } else {
+                Toast.makeText(this, "還沒畫面，凍不了", Toast.LENGTH_SHORT).show();
+                frozen = false;
+                if (server != null) server.setFrozen(false);
+                freezeBtn.setText("凍結");
+            }
+        } else {
+            recvView.setImageBitmap(null);
+            recvView.setVisibility(View.GONE);
+            previewView.setVisibility(previewOn ? View.VISIBLE : View.INVISIBLE);
+            syncHint();
+        }
+    }
+
     private void onFrame(ImageProxy proxy) {
         try {
+            if (frozen) return;  // ponytail: 凍結中不壓 JPEG，server 重發快照就夠，省電
             Image img = proxy.getImage();
             if (img != null && img.getFormat() == ImageFormat.YUV_420_888) {
                 int w = img.getWidth(), h = img.getHeight();
