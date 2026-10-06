@@ -23,7 +23,7 @@ MODES = {
     "WiFi 傳送端": "0",
     "USB webcam": "0",
     "DPO2014B": "USB",
-    "TDS3014B": "192.168.1.60",
+    #"TDS3014B": "192.168.1.60",
 }
 TX_PORT = 8080  # ponytail: 跟手機端同 port，手機接收照抄 IP 就能看，不另記
 DOWN_SIZES = {"720p": 720, "480p": 480}  # ponytail: 只給事後降級用，存檔一律最高

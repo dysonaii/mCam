@@ -30,7 +30,7 @@
 | USB 共享傳送 | USB 共享 | 手機開 USB 數據共享插 PC，PC 按連線（自動找 RNDIS 閘道） |
 | — | USB webcam | PC 本機鏡頭，欄位填 `0/1` |
 | — | DPO2014B | 示波器 USB 直連 PC，PC 欄位填 `USB` |
-| — | TDS3014B | 示波器接 LAN，PC 欄位填示波器 IP |
+| — | TDS3014B | (not yet test) 示波器接 LAN，PC 欄位填示波器 IP |
 
 手機按鍵同一排：`[USB 共享] [WiFi 傳送/接收] [關預覽] [凍結]`，四顆等高，下面兩行是 USB / WiFi 的 URL，點一下複製。接收模式點 WiFi 那行改對方 IP（只打 `192.168.x.x` 即可）。
 
