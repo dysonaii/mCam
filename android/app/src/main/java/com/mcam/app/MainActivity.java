@@ -1,21 +1,22 @@
 package com.mcam.app;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.provider.Settings;
 import android.graphics.ImageFormat;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
 import android.media.Image;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.util.Size;
-import android.view.WindowManager;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
@@ -25,7 +26,9 @@ import android.widget.Toast;
 import androidx.activity.ComponentActivity;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.OptIn;
 import androidx.camera.core.CameraSelector;
+import androidx.camera.core.ExperimentalGetImage;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
@@ -38,6 +41,7 @@ import androidx.core.content.ContextCompat;
 import com.google.common.util.concurrent.ListenableFuture;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -45,7 +49,6 @@ import java.util.concurrent.Executors;
 // ponytail: 前台 Activity + 亮屏保活就夠測 M1，ForegroundService 以後加
 public class MainActivity extends ComponentActivity {
     private static final int PORT = 8080;
-    private ActivityResultLauncher<String> reqCamera;
     private MjpegServer server;
     private ExecutorService cameraIo;
     private PreviewView previewView;
@@ -76,6 +79,7 @@ public class MainActivity extends ComponentActivity {
     // ponytail: 轉向重建同進程，server 不停播不斷流；真離開才停
     private static MjpegServer keptServer;
 
+    @SuppressLint("SetTextI18n")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -105,10 +109,11 @@ public class MainActivity extends ComponentActivity {
 
         cameraIo = Executors.newSingleThreadExecutor();
         // ponytail: 舊 onRequestPermissionsResult 已 deprecated，改 Result API
-        reqCamera = registerForActivityResult(new ActivityResultContracts.RequestPermission(), ok -> {
-            if (Boolean.TRUE.equals(ok)) startCamera();
-            else wifiStatus.setText("沒相機權限就沒畫面");
-        });
+        ActivityResultLauncher<String> reqCamera = registerForActivityResult(
+                new ActivityResultContracts.RequestPermission(), ok -> {
+                    if (Boolean.TRUE.equals(ok)) startCamera();
+                    else wifiStatus.setText("沒相機權限就沒畫面");
+                });
         if (server == null) server = keptServer;  // ponytail: 轉向接回舊 server，PC 不斷線
         previewOn = keptPreviewOn;  // ponytail: 轉向前關了預覽，重建不自動開
         refreshStatus();
@@ -143,14 +148,15 @@ public class MainActivity extends ComponentActivity {
         }
     }
 
+    @SuppressLint("SetTextI18n")
     private void refreshStatus() {
         String sc = prefs.getString("wifi_send_code", "");
-        String suffix = (sc != null && sc.matches("\\d{1,6}")) ? "/" + sc : "";
+        String suffix = sc.matches("\\d{1,6}") ? "/" + sc : "";
         usbUrl = "http://192.168.42.129:8080/v" + suffix;  // ponytail: USB 跟 WiFi 同一組碼，碼不對 server 照 404
-        usbStatus.setText("USB:"+usbUrl);
+        usbStatus.setText("USB:" + usbUrl);
         wifiModeBtn.setText(wifiRecv ? "WiFi 接收" : "WiFi 傳送");
         if (wifiRecv) {
-            wifiStatus.setText(wifiRecvUrl != null ? "WiFi:"+wifiRecvUrl : "WiFi:點此輸入對方 URL");
+            wifiStatus.setText(wifiRecvUrl != null ? "WiFi:" + wifiRecvUrl : "WiFi:點此輸入對方 URL");
             return;
         }
         String w = wifiIp();
@@ -164,7 +170,7 @@ public class MainActivity extends ComponentActivity {
             String hip = ipOf(wifiSendUrl);
             wifiUrl = hip != null ? "http://" + hip + ":8080/v" : null;
         }
-        wifiStatus.setText(wifiUrl != null ? "WiFi:"+wifiUrl : "WiFi:行動網路不能直連");
+        wifiStatus.setText(wifiUrl != null ? "WiFi:" + wifiUrl : "WiFi:行動網路不能直連");
     }
 
     private void toggleWifiMode() {
@@ -176,6 +182,7 @@ public class MainActivity extends ComponentActivity {
 
     // ponytail: 傳送=綁相機推流，接收=解綁相機看對方；各做各的不互卡
     // ponytail: 接收順手關 server，凍結連線不斷 PC 會卡死在 cap.read，連中斷都按不了
+    @SuppressLint("SetTextI18n")
     private void applyMode() {
         if (wifiRecv) {
             stopServer();
@@ -288,6 +295,7 @@ public class MainActivity extends ComponentActivity {
         if (t != null) t.interrupt();
     }
 
+    @SuppressWarnings("BusyWait")
     private void recvLoop(String url) {
         Thread me = Thread.currentThread();
         boolean told = false;
@@ -395,7 +403,7 @@ public class MainActivity extends ComponentActivity {
         et.setSingleLine();
         et.setHint("留空=空碼，或 1~6 碼");
         String cur = prefs.getString("wifi_send_code", "");
-        if (cur != null && !cur.isEmpty()) et.setText(cur);
+        if (!cur.isEmpty()) et.setText(cur);
         new AlertDialog.Builder(this)
                 .setTitle("自家連線碼")
                 .setView(et)
@@ -479,6 +487,7 @@ public class MainActivity extends ComponentActivity {
     }
 
     // ponytail: 讀不到系統 tethering state，就看 rndis/usb 網卡有沒有拿到 IPv4，夠判斷開關
+    @SuppressWarnings("unused")
     static boolean usbTetherOn() {
         try {
             for (java.util.Enumeration<java.net.NetworkInterface> e =
@@ -499,6 +508,8 @@ public class MainActivity extends ComponentActivity {
         return false;
     }
 
+    @OptIn(markerClass = ExperimentalGetImage.class)
+    @SuppressLint("SetTextI18n")
     private void startCamera() {
         ListenableFuture<ProcessCameraProvider> f = ProcessCameraProvider.getInstance(this);
         f.addListener(() -> {
@@ -593,8 +604,9 @@ public class MainActivity extends ComponentActivity {
         syncHint();
     }
 
+    @ExperimentalGetImage
     private void onFrame(ImageProxy proxy) {
-        try {
+        try (proxy) {
             if (frozen) return;  // ponytail: 凍結中不壓 JPEG，server 重發快照就夠，省電
             Image img = proxy.getImage();
             if (img != null && img.getFormat() == ImageFormat.YUV_420_888) {
@@ -611,13 +623,13 @@ public class MainActivity extends ComponentActivity {
                 } else if (deg == 180) {
                     nv21 = rotateNv21(nv21, w, h, deg);
                 }
-                ByteArrayOutputStream out = new ByteArrayOutputStream(nv21.length);
-                new YuvImage(nv21, ImageFormat.NV21, w, h, null)
-                        .compressToJpeg(new Rect(0, 0, w, h), 90, out);
-                if (server != null) server.pushFrame(out.toByteArray(), w, h);  // ponytail: 切接收在飛的幀，server 已關就丟
+                try (ByteArrayOutputStream out = new ByteArrayOutputStream(nv21.length)) {
+                    new YuvImage(nv21, ImageFormat.NV21, w, h, null)
+                            .compressToJpeg(new Rect(0, 0, w, h), 90, out);
+                    if (server != null) server.pushFrame(out.toByteArray(), w, h);  // ponytail: 切接收在飛的幀，server 已關就丟
+                } catch (IOException ignored) {
+                }
             }
-        } finally {
-            proxy.close();
         }
     }
 
@@ -625,7 +637,7 @@ public class MainActivity extends ComponentActivity {
         int w2 = w / 2, h2 = h / 2;
         boolean swap = (deg == 90 || deg == 270);
         int ow = swap ? h : w, oh = swap ? w : h;
-        int ow2 = ow / 2, oh2 = oh / 2;
+        int ow2 = ow / 2;
         byte[] out = new byte[in.length];
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {

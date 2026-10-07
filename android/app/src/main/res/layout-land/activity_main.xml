@@ -3,6 +3,7 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:baselineAligned="false"
     android:orientation="horizontal">
 
     <FrameLayout
@@ -21,6 +22,7 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:background="#000000"
+            android:contentDescription="@null"
             android:scaleType="fitCenter"
             android:visibility="gone" />
 
@@ -45,7 +47,7 @@
             android:layout_height="48dp"
             android:gravity="center"
             android:maxLines="1"
-            android:text="USB 共享"
+            android:text="@string/usb_tether"
             android:textSize="13sp" />
 
         <Button
@@ -54,7 +56,7 @@
             android:layout_height="48dp"
             android:gravity="center"
             android:maxLines="1"
-            android:text="WiFi 傳送"
+            android:text="@string/wifi_send"
             android:textSize="13sp" />
 
         <Button
@@ -63,7 +65,7 @@
             android:layout_height="48dp"
             android:gravity="center"
             android:maxLines="1"
-            android:text="關預覽"
+            android:text="@string/close_preview"
             android:textSize="13sp" />
 
         <Button
@@ -72,7 +74,7 @@
             android:layout_height="48dp"
             android:gravity="center"
             android:maxLines="1"
-            android:text="凍結"
+            android:text="@string/freeze"
             android:textSize="13sp" />
 
         <TextView

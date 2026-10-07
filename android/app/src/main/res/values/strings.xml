@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">mCam</string>
+    <string name="usb_tether">USB 共享</string>
+    <string name="wifi_send">WiFi 傳送</string>
+    <string name="wifi_recv">WiFi 接收</string>
+    <string name="close_preview">關預覽</string>
+    <string name="open_preview">開預覽</string>
+    <string name="freeze">凍結</string>
+    <string name="unfreeze">解凍</string>
+</resources>

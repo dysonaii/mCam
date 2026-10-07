@@ -1,5 +1,7 @@
 package com.mcam.app;
 
+import android.util.Log;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -8,6 +10,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+import java.util.Objects;
 
 // ponytail: 手刻 ServerSocket MJPEG，不引 NanoHTTPD；路由只有 /v /s /i，碼不對即 404
 public class MjpegServer {
@@ -58,6 +61,7 @@ public class MjpegServer {
         }
     }
 
+    @SuppressWarnings("unused")
     public boolean isFrozen() {
         return frozen;
     }
@@ -72,15 +76,15 @@ public class MjpegServer {
 
     // ponytail: 碼必須對上才放行（空碼配空碼、有碼配同碼），不對即 404
     boolean isVideo(String path) {
-        return path.equals(code.isEmpty() ? "/v" : "/v/" + code);
+        return Objects.equals(path, code.isEmpty() ? "/v" : "/v/" + code);
     }
 
     boolean isSnap(String path) {
-        return path.equals(code.isEmpty() ? "/s" : "/s/" + code);
+        return Objects.equals(path, code.isEmpty() ? "/s" : "/s/" + code);
     }
 
     boolean isInfo(String path) {
-        return path.equals(code.isEmpty() ? "/i" : "/i/" + code);
+        return Objects.equals(path, code.isEmpty() ? "/i" : "/i/" + code);
     }
 
     public int getFrameW() {
@@ -97,7 +101,7 @@ public class MjpegServer {
                 Socket s = server.accept();
                 new Thread(() -> serve(s), "mjpeg-client").start();
             } catch (IOException e) {
-                if (running) e.printStackTrace();
+                if (running) Log.e("MjpegServer", "Accept error", e);
             }
         }
     }
@@ -174,6 +178,7 @@ public class MjpegServer {
         out.write(s.getBytes(StandardCharsets.US_ASCII));
     }
 
+    @SuppressWarnings("SameParameterValue")
     private static void sleep(long ms) {
         try {
             Thread.sleep(ms);
