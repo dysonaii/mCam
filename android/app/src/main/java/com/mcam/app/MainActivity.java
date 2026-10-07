@@ -23,10 +23,14 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
+import androidx.camera.core.resolutionselector.ResolutionSelector;
+import androidx.camera.core.resolutionselector.ResolutionStrategy;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.core.content.ContextCompat;
@@ -40,8 +44,8 @@ import java.util.concurrent.Executors;
 
 // ponytail: 前台 Activity + 亮屏保活就夠測 M1，ForegroundService 以後加
 public class MainActivity extends ComponentActivity {
-    private static final int REQ_CAMERA = 1;
     private static final int PORT = 8080;
+    private ActivityResultLauncher<String> reqCamera;
     private MjpegServer server;
     private ExecutorService cameraIo;
     private PreviewView previewView;
@@ -100,6 +104,11 @@ public class MainActivity extends ComponentActivity {
         findViewById(R.id.tetherBtn).setOnClickListener(v -> openTetherSettings());
 
         cameraIo = Executors.newSingleThreadExecutor();
+        // ponytail: 舊 onRequestPermissionsResult 已 deprecated，改 Result API
+        reqCamera = registerForActivityResult(new ActivityResultContracts.RequestPermission(), ok -> {
+            if (Boolean.TRUE.equals(ok)) startCamera();
+            else wifiStatus.setText("沒相機權限就沒畫面");
+        });
         if (server == null) server = keptServer;  // ponytail: 轉向接回舊 server，PC 不斷線
         previewOn = keptPreviewOn;  // ponytail: 轉向前關了預覽，重建不自動開
         refreshStatus();
@@ -108,7 +117,7 @@ public class MainActivity extends ComponentActivity {
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera();
         } else {
-            requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA);
+            reqCamera.launch(Manifest.permission.CAMERA);
         }
     }
 
@@ -490,16 +499,6 @@ public class MainActivity extends ComponentActivity {
         return false;
     }
 
-    @Override
-    public void onRequestPermissionsResult(int code, String[] p, int[] r) {
-        super.onRequestPermissionsResult(code, p, r);
-        if (code == REQ_CAMERA && r.length > 0 && r[0] == PackageManager.PERMISSION_GRANTED) {
-            startCamera();
-        } else {
-            wifiStatus.setText("沒相機權限就沒畫面");
-        }
-    }
-
     private void startCamera() {
         ListenableFuture<ProcessCameraProvider> f = ProcessCameraProvider.getInstance(this);
         f.addListener(() -> {
@@ -508,7 +507,10 @@ public class MainActivity extends ComponentActivity {
                 previewUseCase = new Preview.Builder().build();
                 previewUseCase.setSurfaceProvider(previewView.getSurfaceProvider());
                 analysisUseCase = new ImageAnalysis.Builder()
-                        .setTargetResolution(new Size(1280, 720))
+                        .setResolutionSelector(new ResolutionSelector.Builder()
+                                .setResolutionStrategy(new ResolutionStrategy(new Size(1280, 720),
+                                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
+                                .build())
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
                 analysisUseCase.setAnalyzer(cameraIo, this::onFrame);

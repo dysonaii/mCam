@@ -32,7 +32,7 @@ android {
         release {
             minifyEnabled = false
             // ponytail: 有 keystore.properties(本機 bat 產生，不進版控)才簽名；沒有就出 unsigned，照樣能 build
-            if (ksFile.exists()) signingConfig signingConfigs.release
+            if (ksFile.exists()) signingConfig = signingConfigs.release
         }
     }
 
