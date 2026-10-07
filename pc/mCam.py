@@ -1000,7 +1000,7 @@ def main() -> None:
             window["-STATUS-"].update(f"已存 {p.name}")
         elif event == "圖庫":
             gallery()
-        elif event == "資料夾":
+        elif event == "開資料夾":
             # ponytail: 開 pc/ 目錄(shots+rec 都在裡面)，一顆按鈕涵蓋兩個輸出；subprocess 已有
             subprocess.Popen(["explorer", str(BASE)])
         elif event == "-REC-":
