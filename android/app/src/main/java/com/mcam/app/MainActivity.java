@@ -67,6 +67,7 @@ public class MainActivity extends ComponentActivity {
     private Preview previewUseCase;
     private ImageAnalysis analysisUseCase;
     private boolean previewOn = true;
+    private int sensorOrient = 90;  // ponytail: 背鏡 sensor 方向，onCreate 讀一次就夠
     // ponytail: 轉向 Activity 重建，同進程用 static 接住狀態；真離開(isFinishing)才清
     private static boolean keptPreviewOn = true;
     private static boolean keptFrozen = false;
@@ -84,30 +85,14 @@ public class MainActivity extends ComponentActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        setContentView(R.layout.activity_main);
-        previewView = findViewById(R.id.preview);
-        recvView = findViewById(R.id.recvView);
-        hint = findViewById(R.id.previewHint);
-        usbStatus = findViewById(R.id.usbStatus);
-        wifiStatus = findViewById(R.id.wifiStatus);
         prefs = getSharedPreferences("mCam", MODE_PRIVATE);
         wifiRecv = prefs.getBoolean("wifi_recv", false);
         wifiRecvUrl = prefs.getString("wifi_recv_url", null);
         wifiSendUrl = prefs.getString("wifi_send_url", null);
-        usbStatus.setOnClickListener(v -> editSendCode(usbUrl));  // ponytail: USB 跟 WiFi 同一組碼，點哪行都是改碼+複製該行
-        wifiStatus.setOnClickListener(v -> {
-            if (wifiRecv) editRecvUrl();
-            else editSendCode(wifiUrl);  // ponytail: 傳送模式點 WiFi 行=改自家碼，存了顯示即真相
-        });
-        wifiModeBtn = findViewById(R.id.wifiModeBtn);
-        wifiModeBtn.setOnClickListener(v -> toggleWifiMode());
-        previewBtn = findViewById(R.id.previewBtn);
-        previewBtn.setOnClickListener(v -> togglePreview());
-        freezeBtn = findViewById(R.id.freezeBtn);
-        freezeBtn.setOnClickListener(v -> toggleFreeze());
-        findViewById(R.id.tetherBtn).setOnClickListener(v -> openTetherSettings());
+        bindUi();  // ponytail: 綁 view+監聽+還原狀態；轉向重載直/橫排版也走這裡，相機不斷
 
         cameraIo = Executors.newSingleThreadExecutor();
+        sensorOrient = backSensorOrient();
         // ponytail: 舊 onRequestPermissionsResult 已 deprecated，改 Result API
         ActivityResultLauncher<String> reqCamera = registerForActivityResult(
                 new ActivityResultContracts.RequestPermission(), ok -> {
@@ -130,6 +115,79 @@ public class MainActivity extends ComponentActivity {
     protected void onResume() {
         super.onResume();
         if (wifiStatus != null) refreshStatus();  // ponytail: 從系統設定頁回來順手更新，不用重開 App
+    }
+
+    // ponytail: manifest 擋了重建，轉向自己同步目標旋轉，否則 rotationDegrees 停在舊值、PC 畫面不跟著轉
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        bindUi();  // ponytail: 重載直/橫排版（按鈕回右邊），只重綁 view
+        int rot = getWindowManager().getDefaultDisplay().getRotation();
+        try {
+            if (previewUseCase != null) previewUseCase.setTargetRotation(rot);
+            if (analysisUseCase != null) analysisUseCase.setTargetRotation(rot);
+        } catch (Exception ignored) {
+        }
+        // ponytail: 動態改旋轉有機率 hang 管線（PC 凍在糊幀），重走 applyMode 回到跟重開一樣的好狀態
+        try {
+            applyMode();
+        } catch (Exception ignored) {
+        }
+    }
+
+    // ponytail: 直/橫 layout 同名 id，onCreate 和轉向共用；只碰 view，不碰相機綁定/server/執行緒
+    private void bindUi() {
+        setContentView(R.layout.activity_main);
+        previewView = findViewById(R.id.preview);
+        recvView = findViewById(R.id.recvView);
+        hint = findViewById(R.id.previewHint);
+        usbStatus = findViewById(R.id.usbStatus);
+        wifiStatus = findViewById(R.id.wifiStatus);
+        usbStatus.setOnClickListener(v -> editSendCode(usbUrl));  // ponytail: USB 跟 WiFi 同一組碼，點哪行都是改碼+複製該行
+        wifiStatus.setOnClickListener(v -> {
+            if (wifiRecv) editRecvUrl();
+            else editSendCode(wifiUrl);  // ponytail: 傳送模式點 WiFi 行=改自家碼，存了顯示即真相
+        });
+        wifiModeBtn = findViewById(R.id.wifiModeBtn);
+        wifiModeBtn.setOnClickListener(v -> toggleWifiMode());
+        previewBtn = findViewById(R.id.previewBtn);
+        previewBtn.setOnClickListener(v -> togglePreview());
+        freezeBtn = findViewById(R.id.freezeBtn);
+        freezeBtn.setOnClickListener(v -> toggleFreeze());
+        findViewById(R.id.tetherBtn).setOnClickListener(v -> openTetherSettings());
+        if (previewUseCase != null) {
+            try {
+                previewUseCase.setSurfaceProvider(previewView.getSurfaceProvider());
+            } catch (Exception ignored) {
+            }
+        }
+        refreshStatus();
+        restoreUiState();
+    }
+
+    // ponytail: 還原按鈕字/開關/顯隱就好，applyMode 那套 unbind/server/thread 一概不碰
+    private void restoreUiState() {
+        if (wifiRecv) {
+            previewView.setVisibility(View.INVISIBLE);
+            recvView.setVisibility(View.VISIBLE);
+            previewBtn.setEnabled(false);
+            freezeBtn.setText("凍結");
+            freezeBtn.setEnabled(false);
+        } else {
+            previewBtn.setEnabled(true);
+            previewBtn.setText(previewOn ? "關預覽" : "開預覽");
+            freezeBtn.setEnabled(true);
+            freezeBtn.setText(frozen ? "解凍" : "凍結");
+            if (frozen && keptJpeg != null) {
+                showFrozen(keptJpeg);
+            } else {
+                recvView.setVisibility(View.GONE);
+                recvView.setImageBitmap(null);
+                previewView.setVisibility(previewOn ? View.VISIBLE : View.INVISIBLE);
+            }
+        }
+        syncHint();
     }
 
     // ponytail: 第三方 App 拿不到 TETHER_PRIVILEGED，直接開關系統不給；
@@ -519,7 +577,7 @@ public class MainActivity extends ComponentActivity {
                 previewUseCase.setSurfaceProvider(previewView.getSurfaceProvider());
                 analysisUseCase = new ImageAnalysis.Builder()
                         .setResolutionSelector(new ResolutionSelector.Builder()
-                                .setResolutionStrategy(new ResolutionStrategy(new Size(1280, 720),
+                                .setResolutionStrategy(new ResolutionStrategy(new Size(854, 480),
                                         ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
                                 .build())
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -612,9 +670,8 @@ public class MainActivity extends ComponentActivity {
             if (img != null && img.getFormat() == ImageFormat.YUV_420_888) {
                 int w = img.getWidth(), h = img.getHeight();
                 byte[] nv21 = yuv420ToNv21(img);
-                // ponytail: sensor 橫的，直屏時 rotationDegrees=90；NV21 先轉正再壓 JPEG，
-                // /v /s /i 全都正，PC 不用動
-                int deg = proxy.getImageInfo().getRotationDegrees();
+                // ponytail: deg 跟著當下螢幕即時算，不吃 proxy 快取，轉向即跟
+                int deg = liveDeg(proxy);
                 if (deg == 90 || deg == 270) {
                     nv21 = rotateNv21(nv21, w, h, deg);
                     int t = w;
@@ -624,13 +681,54 @@ public class MainActivity extends ComponentActivity {
                     nv21 = rotateNv21(nv21, w, h, deg);
                 }
                 try (ByteArrayOutputStream out = new ByteArrayOutputStream(nv21.length)) {
+                    // ponytail: q70 流量少一半，720p 照留給 PC 截圖/錄影，直橫屏照轉
                     new YuvImage(nv21, ImageFormat.NV21, w, h, null)
-                            .compressToJpeg(new Rect(0, 0, w, h), 90, out);
+                            .compressToJpeg(new Rect(0, 0, w, h), 70, out);
                     if (server != null) server.pushFrame(out.toByteArray(), w, h);  // ponytail: 切接收在飛的幀，server 已關就丟
                 } catch (IOException ignored) {
                 }
             }
         }
+    }
+
+    // ponytail: 背鏡 deg = sensor - 螢幕方向；讀不到才退回 proxy 快取值
+    static int rotToDeg(int rot) {
+        if (rot == android.view.Surface.ROTATION_90) return 90;
+        if (rot == android.view.Surface.ROTATION_180) return 180;
+        if (rot == android.view.Surface.ROTATION_270) return 270;
+        return 0;
+    }
+
+    @SuppressWarnings("deprecation")
+    private int liveDeg(ImageProxy proxy) {
+        try {
+            int r = getWindowManager().getDefaultDisplay().getRotation();
+            return (sensorOrient - rotToDeg(r) + 360) % 360;
+        } catch (Exception e) {
+            try {
+                return proxy.getImageInfo().getRotationDegrees();
+            } catch (Exception e2) {
+                return 0;
+            }
+        }
+    }
+
+    private int backSensorOrient() {
+        try {
+            android.hardware.camera2.CameraManager cm =
+                    (android.hardware.camera2.CameraManager) getSystemService(CAMERA_SERVICE);
+            for (String id : cm.getCameraIdList()) {
+                android.hardware.camera2.CameraCharacteristics c = cm.getCameraCharacteristics(id);
+                Integer facing = c.get(android.hardware.camera2.CameraCharacteristics.LENS_FACING);
+                if (facing != null
+                        && facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK) {
+                    Integer o = c.get(android.hardware.camera2.CameraCharacteristics.SENSOR_ORIENTATION);
+                    if (o != null) return o;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return 90;
     }
 
     static byte[] rotateNv21(byte[] in, int w, int h, int deg) {

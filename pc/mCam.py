@@ -33,7 +33,7 @@ ICON = BASE / "mCam.ico"
 CFG = BASE / "mCam.json"
 SHOTS.mkdir(exist_ok=True)
 REC.mkdir(exist_ok=True)
-BLACK = cv2.imencode(".png", np.zeros((480, 640, 3), np.uint8))[1].tobytes()  # ponytail: 未連線/斷線黑屏佔位
+BLACK = cv2.imencode(".png", np.zeros((360, 640, 3), np.uint8))[1].tobytes()  # ponytail: 未連線/斷線黑屏佔位
 _ovlbl = None
 _ov_on = False
 
@@ -252,9 +252,15 @@ def open_cap(spec: str, mode: str = ""):
         return cap
     # ponytail: 手機先關會剩半開連線(不斷也不送資料)，ffmpeg 預設等到天荒地老、
     # UI 卡到中斷都按不了；3s 超時逼 read 回來走斷線重連
-    return cv2.VideoCapture(spec, cv2.CAP_FFMPEG,
+    # ponytail: BUFFERSIZE 只能開完再 set，塞進 open 參數 ffmpeg 整個打不開
+    cap = cv2.VideoCapture(spec, cv2.CAP_FFMPEG,
                             [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000,
                              cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000])
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
+    return cap
 
 
 def rndis_gateway() -> str | None:
@@ -825,7 +831,9 @@ def main() -> None:
          sg.Combo(list(MODES),
                   default_value=cur_mode, key="-MODE-", readonly=True,
                   enable_events=True, size=(14, 1)),
-         sg.Input(urls[cur_mode], key="-URL-", size=(40, 1))],
+         sg.Input(urls[cur_mode], key="-URL-", size=(40, 1)),
+         sg.Checkbox("鏡像", default=True, key="-MIR-", enable_events=True,
+                     disabled=cur_mode != "WebCam", tooltip="WebCam 才有效")],
         [sg.Button("連線"), sg.Button("中斷"),
          sg.Button("截圖"), sg.Button("●錄影", key="-REC-"),
          sg.Button("圖庫"), sg.Button("開資料夾"),
@@ -868,7 +876,10 @@ def main() -> None:
     writer: cv2.VideoWriter | None = None
     frame = None
     fails = 0
+    active_conn, active_mode = "", ""  # ponytail: 哨兵重開 cap 用，跟著連線/重連走，中斷清掉
+    last_wh, last_dim_chk = None, 0.0
     rec_t0, rec_last, rec_name, src_fps = 0.0, -1, "", 20.0
+    rec_w, rec_h = 0, 0  # ponytail: 轉向換尺寸錄影跟著換檔，不混寫
     tx_on = False
     mirror = False
 
@@ -881,6 +892,7 @@ def main() -> None:
             urls[cur_mode] = window["-URL-"].get()
             cur_mode = values["-MODE-"]
             window["-URL-"].update(urls[cur_mode])
+            window["-MIR-"].update(disabled=cur_mode != "WebCam")
             if cur_mode in TEK_MODES:
                 window["-STATUS-"].update(tek_hint(cur_mode))
             save_cfg(cur_mode, urls, _tx_ip, tx, _tx_code)
@@ -919,8 +931,9 @@ def main() -> None:
             else:
                 conn = spec
             cap = open_cap(conn, mode_now)
+            active_conn, active_mode = conn, mode_now
             fails = 0
-            mirror = mode_now == "WebCam"  # ponytail: 本機鏡頭才鏡像，手機/示波器來的畫面本來就是正的
+            mirror = mode_now == "WebCam" and bool(values.get("-MIR-"))  # ponytail: 本機鏡頭才鏡像，手機/示波器來的本來就是正的
             # ponytail: 示波器幾秒一張，錄影 fps 寫 2.0/1.0 就夠，不猜 server fps
             src_fps = {"DPO2014B": 2.0, "TDS3014B": 1.0}.get(
                 mode_now, 20.0 if conn.strip().isdigit() else server_fps(conn))
@@ -949,11 +962,16 @@ def main() -> None:
             tx_stop()
             tx_on = False
             mirror = False
+            active_conn, active_mode = "", ""
+            last_wh = None
             if cap is not None:
                 cap.release()
                 cap = None
             set_black(window, "已斷線")
             window["-STATUS-"].update("已中斷")
+        elif event == "-MIR-":
+            # ponytail: 連線中也能即時切，不用重連
+            mirror = cur_mode == "WebCam" and bool(values.get("-MIR-"))
         elif event == "-TX-":
             # ponytail: 勾=有畫面就即開 serve，沒連線就等連線時開；取消勾即停；單一全域
             tx = bool(values.get("-TX-"))
@@ -993,6 +1011,7 @@ def main() -> None:
                 p = REC / f"VID_{datetime.now():%Y%m%d_%H%M%S}.mp4"
                 writer = make_writer(p, w, h, src_fps)
                 rec_t0, rec_last, rec_name = time.monotonic(), -1, p.name
+                rec_w, rec_h = w, h
                 window["-REC-"].update("■停止")
                 window["-STATUS-"].update(f"錄影中 {p.name}")
             else:
@@ -1007,22 +1026,36 @@ def main() -> None:
             except Exception:
                 ok, frame = False, None  # ponytail: read 中 release 會丟 C++ 例外，當斷幀走重連
             now = time.monotonic()
-            if ok:
+            if ok and frame is not None:  # ponytail: ffmpeg 首幀常回 ok+None，不擋就 frame.shape 炸掉閃退
                 if mirror:
                     frame = cv2.flip(frame, 1)  # ponytail: 本機鏡頭照鏡子，右手不再跑到左邊；轉播/錄影跟著正
                 fails = 0
+                last_wh = (frame.shape[1], frame.shape[0])
                 set_black(window, None)  # ponytail: 有幀就藏灰字，不重刷圖免閃
                 if tx_on:
                     tx_push(frame)
                 if writer is not None:
+                    if (frame.shape[1], frame.shape[0]) != (rec_w, rec_h):
+                        # ponytail: 轉向換尺寸就另存新檔，舊檔正常收尾
+                        writer.release()
+                        h, w = frame.shape[:2]
+                        p = REC / f"VID_{datetime.now():%Y%m%d_%H%M%S}.mp4"
+                        writer = make_writer(p, w, h, src_fps)
+                        rec_t0, rec_last, rec_name = time.monotonic(), -1, p.name
+                        rec_w, rec_h = w, h
                     writer.write(frame)
                     s = int(now - rec_t0)
                     if s != rec_last:
                         rec_last = s
                         window["-STATUS-"].update(f"錄影中 {rec_name} {s // 60:02d}:{s % 60:02d}")
-                small = frame if frame.shape[1] <= 640 else cv2.resize(
-                    frame, (640, int(frame.shape[0] * 640 / frame.shape[1])))
-                window["-IMG-"].update(data=cv2.imencode(".png", small)[1].tobytes())
+                h0, w0 = frame.shape[:2]
+                s = min(640 / w0, 360 / h0)  # ponytail: 固定 640x360 黑底置中，橫屏滿框、直屏居中，視窗不跳
+                small = frame if s >= 1 else cv2.resize(frame, (int(w0 * s), int(h0 * s)))
+                sh, sw = small.shape[:2]
+                canvas = np.zeros((360, 640, 3), np.uint8)
+                canvas[(360 - sh) // 2:(360 - sh) // 2 + sh,
+                       (640 - sw) // 2:(640 - sw) // 2 + sw] = small
+                window["-IMG-"].update(data=cv2.imencode(".png", canvas, [cv2.IMWRITE_PNG_COMPRESSION, 1])[1].tobytes())  # ponytail: tk 只吃 png/gif，壓縮開 1 求快
             else:
                 fails += 1
                 # ponytail: 連壞 ~30 次(約6秒)才重連一次；server 沒回來就等下輪，不狂刷
@@ -1039,10 +1072,31 @@ def main() -> None:
                         window.refresh()
                         cap.release()
                         cap = open_cap(spec_now, mode_now)
+                        active_conn, active_mode = spec_now, mode_now
                         if not cap.isOpened():
                             window["-STATUS-"].update("斷線：重連失敗，檢查手機/線")
                     else:
                         window["-STATUS-"].update("斷線重試中...")
+            if (now - last_dim_chk > 2.0 and last_wh is not None
+                    and active_conn.startswith("http") and active_mode not in TEK_MODES):
+                # ponytail: ffmpeg 換尺寸會僵住(舊幀重播也不報錯)，/i 的 w/h 當哨兵，變了就重開 cap
+                last_dim_chk = now
+                try:
+                    raw = urllib.request.urlopen(info_url(active_conn), timeout=1.5).read(256).decode()
+                    d = json.loads(raw)
+                    srv_wh = (int(d.get("w", 0)), int(d.get("h", 0)))
+                except Exception:
+                    srv_wh = None
+                if srv_wh is not None and srv_wh[0] > 0 and srv_wh != last_wh:
+                    window["-STATUS-"].update("轉向換尺寸，重開畫面...")
+                    window.refresh()
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                    cap = open_cap(active_conn, active_mode)
+                    fails = 0
+                    last_wh = None
 
     tx_stop()
     if writer is not None:
@@ -1062,4 +1116,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        try:
+            (BASE / "crash.log").write_text(traceback.format_exc(), encoding="utf-8")
+        except Exception:
+            pass
+        raise
