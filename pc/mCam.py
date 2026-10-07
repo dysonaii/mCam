@@ -73,9 +73,11 @@ def load_cfg() -> dict:
         tx = any(raw_tx.values()) if isinstance(raw_tx, dict) else bool(raw_tx)
         code = d.get("tx_code") or ""  # ponytail: 轉播自加碼，舊檔沒有就空碼
         code = code if re.fullmatch(r"\d{1,6}", code or "") else ""
-        return {"mode": m, "urls": urls, "tx_ip": d.get("tx_ip"), "tx": tx, "tx_code": code}
+        return {"mode": m, "urls": urls, "tx_ip": d.get("tx_ip"), "tx": tx, "tx_code": code,
+                "mir": bool(d.get("mir", True))}  # ponytail: 鏡像勾舊檔沒有就預設勾，跟以前行為一樣
     except Exception:
-        return {"mode": "USB", "urls": dict(MODES), "tx_ip": None, "tx": False, "tx_code": ""}
+        return {"mode": "USB", "urls": dict(MODES), "tx_ip": None, "tx": False, "tx_code": "",
+                "mir": True}
 
 
 def save_cfg(mode: str, urls: dict, tx_ip=None, tx=False, tx_code="") -> None:
@@ -84,7 +86,7 @@ def save_cfg(mode: str, urls: dict, tx_ip=None, tx=False, tx_code="") -> None:
         if mode not in MODES:
             return
         CFG.write_text(json.dumps({"mode": mode, "urls": urls, "tx_ip": tx_ip,
-                                   "tx": bool(tx), "tx_code": tx_code or ""},
+                                   "tx": bool(tx), "tx_code": tx_code or "", "mir": _mir},
                                   ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
@@ -347,6 +349,7 @@ def pc_ip() -> str:
 
 _tx_ip: str | None = None
 _tx_code: str = ""  # ponytail: 轉播自加碼，空=空碼；server 空碼/1~6碼本來就全放行
+_mir: bool = True  # ponytail: 鏡像勾單一全域，跟轉播一樣不分來源
 
 
 def lan_ips() -> list:
@@ -811,7 +814,7 @@ def gallery() -> None:
 
 
 def main() -> None:
-    global _tx_ip, _tx_code
+    global _tx_ip, _tx_code, _mir
     cfg = load_cfg()
     urls = cfg["urls"]
     cur_mode = cfg["mode"]
@@ -823,6 +826,7 @@ def main() -> None:
         if _ips and _tx_ip not in _ips:
             _tx_ip = None
     _tx_code = cfg.get("tx_code") or ""
+    _mir = bool(cfg.get("mir", True))
     tx = bool(cfg.get("tx", False))  # ponytail: 轉播勾+IP+碼單一全域，跟來源無關，切 combo 不動
     tx_init = tx_url()  # ponytail: 轉播欄顯示完整 URL，來源 IP 不帶入（兩者本來就不同網）
     layout = [
@@ -832,7 +836,7 @@ def main() -> None:
                   default_value=cur_mode, key="-MODE-", readonly=True,
                   enable_events=True, size=(14, 1)),
          sg.Input(urls[cur_mode], key="-URL-", size=(40, 1)),
-         sg.Checkbox("鏡像", default=True, key="-MIR-", enable_events=True,
+         sg.Checkbox("鏡像", default=_mir, key="-MIR-", enable_events=True,
                      disabled=cur_mode != "WebCam", tooltip="WebCam 才有效")],
         [sg.Button("連線"), sg.Button("中斷"),
          sg.Button("截圖"), sg.Button("●錄影", key="-REC-"),
@@ -970,8 +974,9 @@ def main() -> None:
             set_black(window, "已斷線")
             window["-STATUS-"].update("已中斷")
         elif event == "-MIR-":
-            # ponytail: 連線中也能即時切，不用重連
-            mirror = cur_mode == "WebCam" and bool(values.get("-MIR-"))
+            # ponytail: 連線中也能即時切，不用重連；值記全域，存檔跟著走
+            _mir = bool(values.get("-MIR-"))
+            mirror = cur_mode == "WebCam" and _mir
         elif event == "-TX-":
             # ponytail: 勾=有畫面就即開 serve，沒連線就等連線時開；取消勾即停；單一全域
             tx = bool(values.get("-TX-"))
