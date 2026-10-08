@@ -577,7 +577,7 @@ public class MainActivity extends ComponentActivity {
                 previewUseCase.setSurfaceProvider(previewView.getSurfaceProvider());
                 analysisUseCase = new ImageAnalysis.Builder()
                         .setResolutionSelector(new ResolutionSelector.Builder()
-                                .setResolutionStrategy(new ResolutionStrategy(new Size(854, 480),
+                                .setResolutionStrategy(new ResolutionStrategy(new Size(960, 720),
                                         ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
                                 .build())
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)

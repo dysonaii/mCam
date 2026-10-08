@@ -25,7 +25,7 @@ MODES = {
     #"TDS3014B": "192.168.1.60",
 }
 TX_PORT = 8080  # ponytail: 跟手機端同 port，手機接收照抄 IP 就能看，不另記
-DOWN_SIZES = {"720p": 720, "480p": 480}  # ponytail: 只給事後降級用，存檔一律最高
+DOWN_SIZES = {"480p": 480, "360p": 360, "240p": 240}  # ponytail: 只給事後降級用，存檔一律最高
 BASE = Path(__file__).parent
 SHOTS = BASE / "shots"
 REC = BASE / "rec"
@@ -33,7 +33,7 @@ ICON = BASE / "mCam.ico"
 CFG = BASE / "mCam.json"
 SHOTS.mkdir(exist_ok=True)
 REC.mkdir(exist_ok=True)
-BLACK = cv2.imencode(".png", np.zeros((360, 640, 3), np.uint8))[1].tobytes()  # ponytail: 未連線/斷線黑屏佔位
+BLACK = cv2.imencode(".png", np.zeros((480, 640, 3), np.uint8))[1].tobytes()  # ponytail: 未連線/斷線黑屏佔位
 _ovlbl = None
 _ov_on = False
 
@@ -604,7 +604,8 @@ def downgrade_file(path: Path, h: int) -> str:
 
 def ask_downgrade(name: str) -> int | None:
     win = sg.Window("降級", [[sg.Text(f"{name} 壓成？")],
-                             [sg.Button("720p"), sg.Button("480p"), sg.Button("取消")]],
+                             [sg.Button("480p"), sg.Button("360p"), sg.Button("240p"),
+                              sg.Button("取消")]],
                     modal=True)
     ev, _ = win.read()
     win.close()
@@ -718,7 +719,8 @@ def gallery() -> None:
                sg.Button("壓", key="DOWN", disabled=True),
                sg.Button("刪", key="DEL", disabled=True),
                sg.Button("全選", key="ALL"),
-               sg.Button("全不選", key="NONE")]]
+               sg.Button("全不選", key="NONE"),
+               sg.Button("↺重整", key="RE")]]
     win = sg.Window("圖庫", layout, modal=True, finalize=True)
     win.bind("<Control-a>", "ALL")  # ponytail: 共用 ALL 鍵，不另分支
     win.bind("<Control-A>", "ALL")
@@ -768,6 +770,10 @@ def gallery() -> None:
             if dbl:
                 play_file(label_to_path(lb))
             continue
+        if ev == "RE":  # ponytail: 重掃 shots/rec，關了重開一張，最省事；選取不保留
+            win.close()
+            gallery()
+            return
         lab = next(iter(sel), "")  # ponytail: 放/壓被 disabled 擋，這裡必單選；ALL/NONE 經此不取也無害
         if ev == "ALL":
             sel = set(order)
@@ -1054,11 +1060,11 @@ def main() -> None:
                         rec_last = s
                         window["-STATUS-"].update(f"錄影中 {rec_name} {s // 60:02d}:{s % 60:02d}")
                 h0, w0 = frame.shape[:2]
-                s = min(640 / w0, 360 / h0)  # ponytail: 固定 640x360 黑底置中，橫屏滿框、直屏居中，視窗不跳
+                s = min(640 / w0, 480 / h0)  # ponytail: 固定 640x480 黑底置中，4:3 橫屏滿框、直屏居中
                 small = frame if s >= 1 else cv2.resize(frame, (int(w0 * s), int(h0 * s)))
                 sh, sw = small.shape[:2]
-                canvas = np.zeros((360, 640, 3), np.uint8)
-                canvas[(360 - sh) // 2:(360 - sh) // 2 + sh,
+                canvas = np.zeros((480, 640, 3), np.uint8)
+                canvas[(480 - sh) // 2:(480 - sh) // 2 + sh,
                        (640 - sw) // 2:(640 - sw) // 2 + sw] = small
                 window["-IMG-"].update(data=cv2.imencode(".png", canvas, [cv2.IMWRITE_PNG_COMPRESSION, 1])[1].tobytes())  # ponytail: tk 只吃 png/gif，壓縮開 1 求快
             else:
