@@ -17,6 +17,17 @@ import cv2
 import numpy as np
 import PySimpleGUI as sg
 
+sg.set_options(suppress_raise_key_errors=False, suppress_error_popups=False, suppress_key_guessing=False)
+
+try:
+    from scope import tek_config_dialog
+except Exception:
+    def tek_config_dialog(_tek, preview_update=None):
+        try:
+            sg.popup_error("無法載入 scope 模組")
+        except Exception:
+            pass
+
 MODES = {
     "USB": "http://192.168.42.129:8080/v",
     "WiFi": "http://192.168.1.100:8080/v",
@@ -176,6 +187,8 @@ class TekCap:
         self._run = True
         self._inst = None
         self._err = ""
+        self._model = model
+        self._scpi_lock = threading.RLock()
         try:
             import pyvisa
             if model == "tds":
@@ -183,8 +196,9 @@ class TekCap:
                 host = tek_ip(spec)
                 inst = pyvisa.ResourceManager().open_resource(f"TCPIP::{host}::INSTR")
                 inst.timeout = 20000  # ponytail: 10Base-T+老 CPU，截圖慢，timeout 給寬
-                inst.write("HARDCOPY:FORMAT PNG")
-                inst.write("HARDCOPY:PORT ETHERNET")
+                with self._scpi_lock:
+                    inst.write("HARDCOPY:FORMAT PNG")
+                    inst.write("HARDCOPY:PORT ETHERNET")
             else:
                 if tek_ip(spec):
                     self._err = "DPO使用USB，欄位填USB"
@@ -192,7 +206,8 @@ class TekCap:
                 res = tek_visa_resource(spec)
                 inst = pyvisa.ResourceManager().open_resource(res)
                 inst.timeout = 8000
-                inst.write("SAVe:IMAGe:FILEFormat PNG")
+                with self._scpi_lock:
+                    inst.write("SAVe:IMAGe:FILEFormat PNG")
             self._inst = inst
             self._ok = True
         except Exception as e:
@@ -202,8 +217,13 @@ class TekCap:
         threading.Thread(target=self._poll, daemon=True).start()
 
     def _grab(self):
-        self._inst.write("HARDCopy STARt")
-        return tek_png(bytes(self._inst.read_raw()))
+        try:
+            with self._scpi_lock:
+                self._inst.write("HARDCopy STARt")
+                raw = bytes(self._inst.read_raw())
+            return tek_png(raw)
+        except Exception:
+            raise
 
     def _poll(self):
         while self._run:
@@ -232,12 +252,43 @@ class TekCap:
         self._run = False
         try:
             if self._inst is not None:
-                self._inst.close()
+                with getattr(self, "_scpi_lock", threading.RLock()):
+                    self._inst.close()
         except Exception:
             pass
 
     def get(self, _id) -> float:
         return 0.0
+
+    def scpi_write(self, cmd: str) -> bool:
+        try:
+            inst = self._inst
+            if inst is None:
+                return False
+            with getattr(self, "_scpi_lock", threading.RLock()):
+                inst.write(cmd)
+            return True
+        except Exception:
+            return False
+
+    def scpi_query(self, cmd: str) -> str:
+        try:
+            inst = self._inst
+            if inst is None:
+                return ""
+            with getattr(self, "_scpi_lock", threading.RLock()):
+                try:
+                    r = inst.query(cmd)
+                except Exception:
+                    inst.write(cmd)
+                    r = inst.read_raw()
+                    if isinstance(r, bytes):
+                        r = r.decode("latin-1", errors="ignore")
+            if isinstance(r, bytes):
+                r = r.decode("latin-1", errors="ignore")
+            return str(r).strip()
+        except Exception:
+            return ""
 
 
 def open_cap(spec: str, mode: str = ""):
@@ -850,7 +901,8 @@ def main() -> None:
          sg.Checkbox("轉播", default=tx, key="-TX-", enable_events=True,
                      tooltip="勾=區網 browser 開轉播欄的 URL 即看"),
          sg.Input(tx_init, key="-TXIP-", size=(32, 1), tooltip="轉播 URL（可自加 1~6 碼，手機照抄即看）")],
-        [sg.Text("USB/WiFi填IP，加碼貼URL；WebCam填0/1；DPO填USB", key="-STATUS-", size=(60, 1))],
+        [sg.Button("Config 示波器", key="-CFG-", disabled=True),
+         sg.Text("USB/WiFi填IP，加碼貼URL；WebCam填0/1；DPO填USB", key="-STATUS-", size=(48, 1))],
     ]
     window = sg.Window("mCam", layout, finalize=True)
     window.set_icon(str(ICON))  # ponytail: 建構式吃 icon 不會套用(實測)，要事後 set_icon
@@ -893,6 +945,29 @@ def main() -> None:
     tx_on = False
     mirror = False
 
+    def draw_preview(img) -> None:
+        h0, w0 = img.shape[:2]
+        scale = min(640 / w0, 480 / h0)
+        small = img if scale >= 1 else cv2.resize(img, (int(w0 * scale), int(h0 * scale)))
+        sh, sw = small.shape[:2]
+        canvas = np.zeros((480, 640, 3), np.uint8)
+        canvas[(480 - sh) // 2:(480 - sh) // 2 + sh,
+               (640 - sw) // 2:(640 - sw) // 2 + sw] = small
+        window["-IMG-"].update(data=cv2.imencode(".png", canvas, [cv2.IMWRITE_PNG_COMPRESSION, 1])[1].tobytes())
+
+    def pump_preview() -> None:
+        nonlocal frame
+        if cap is None or not cap.isOpened():
+            return
+        ok, latest = cap.read()
+        if not ok or latest is None:
+            return
+        frame = cv2.flip(latest, 1) if mirror else latest
+        set_black(window, None)
+        if tx_on:
+            tx_push(frame)
+        draw_preview(frame)
+
     while True:
         event, values = window.read(timeout=20)
         if event in (sg.WIN_CLOSED, "Exit"):
@@ -903,6 +978,10 @@ def main() -> None:
             cur_mode = values["-MODE-"]
             window["-URL-"].update(urls[cur_mode])
             window["-MIR-"].update(disabled=cur_mode != "WebCam")
+            try:
+                window["-CFG-"].update(disabled=True)
+            except Exception:
+                pass
             if cur_mode in TEK_MODES:
                 window["-STATUS-"].update(tek_hint(cur_mode))
             save_cfg(cur_mode, urls, _tx_ip, tx, _tx_code)
@@ -952,11 +1031,26 @@ def main() -> None:
                 urls[mode_now] = spec
                 save_cfg(mode_now, urls, _tx_ip, tx, _tx_code)
                 window["-STATUS-"].update("連線中...")
+                try:
+                    if mode_now == "DPO2014B" and isinstance(cap, TekCap):
+                        window["-CFG-"].update(disabled=False)
+                    else:
+                        window["-CFG-"].update(disabled=True)
+                except Exception:
+                    pass
             elif mode_now in TEK_MODES:
                 # ponytail: 示波器開不起來多半是 VISA/驅動層(看得到打不開)，直接秀原因；重插 USB/重開示波器多半就好
                 window["-STATUS-"].update(f"連不上：{getattr(cap, '_err', '') or 'VISA打不開'}（試重插USB/重開示波器/關NI-MAX）")
+                try:
+                    window["-CFG-"].update(disabled=True)
+                except Exception:
+                    pass
             else:
                 window["-STATUS-"].update("連不上：webcam被佔用？換 0/1 試試")
+                try:
+                    window["-CFG-"].update(disabled=True)
+                except Exception:
+                    pass
             if cap.isOpened() and values.get("-TX-"):
                 # ponytail: 勾轉播=任何來源都 serve，區網 browser 開轉播欄的 URL 即看
                 sync_tx_ip()
@@ -979,6 +1073,16 @@ def main() -> None:
                 cap = None
             set_black(window, "已斷線")
             window["-STATUS-"].update("已中斷")
+            try:
+                window["-CFG-"].update(disabled=True)
+            except Exception:
+                pass
+        elif event == "-CFG-":
+            # ponytail: tek_config_dialog 必須在 main thread 執行，直接呼叫不 spawn thread
+            if cap is not None and isinstance(cap, TekCap) and cap.isOpened() and cur_mode == "DPO2014B":
+                tek_config_dialog(cap, pump_preview)
+            else:
+                sg.popup_error("僅 DPO2014B 連線成功時可用")
         elif event == "-MIR-":
             # ponytail: 連線中也能即時切，不用重連；值記全域，存檔跟著走
             _mir = bool(values.get("-MIR-"))
@@ -1059,14 +1163,7 @@ def main() -> None:
                     if s != rec_last:
                         rec_last = s
                         window["-STATUS-"].update(f"錄影中 {rec_name} {s // 60:02d}:{s % 60:02d}")
-                h0, w0 = frame.shape[:2]
-                s = min(640 / w0, 480 / h0)  # ponytail: 固定 640x480 黑底置中，4:3 橫屏滿框、直屏居中
-                small = frame if s >= 1 else cv2.resize(frame, (int(w0 * s), int(h0 * s)))
-                sh, sw = small.shape[:2]
-                canvas = np.zeros((480, 640, 3), np.uint8)
-                canvas[(480 - sh) // 2:(480 - sh) // 2 + sh,
-                       (640 - sw) // 2:(640 - sw) // 2 + sw] = small
-                window["-IMG-"].update(data=cv2.imencode(".png", canvas, [cv2.IMWRITE_PNG_COMPRESSION, 1])[1].tobytes())  # ponytail: tk 只吃 png/gif，壓縮開 1 求快
+                draw_preview(frame)
             else:
                 fails += 1
                 # ponytail: 連壞 ~30 次(約6秒)才重連一次；server 沒回來就等下輪，不狂刷
