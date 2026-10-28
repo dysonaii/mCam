@@ -239,78 +239,18 @@ class DpoScope:
         return False
 
     def tb_pos(self) -> str:
-        for cmd in (
-            "HORizontal:MAIn:POSition?",
-            "HORizontal:POSition?",
-            "HOR:POSition?",
-            "HORIZONTAL:MAIN:POSITION?",
-            "HORIZONTAL:POSITION?",
-            "HORizontal:MAIn:DELay:POSition?",
-            "HORizontal:DELay:POSition?",
-            "HORIZONTAL:MAIN:DELAY:POSITION?",
-            ":HORizontal:MAIn:POSition?",
-            ":HORizontal:POSition?",
-        ):
-            try:
-                s = self.query(cmd)
-                if s:
-                    return s.strip()
-            except Exception:
-                continue
-        return ""
+        return self.query("HORizontal:DELay:TIMe?").strip()
 
     def tb_set_pos(self, val: str) -> bool:
         val = (val or "").strip()
         if not val:
             return False
         v = _parse_time_to_sec(val)
-        # try common forms for DPO/Tek
-        for cmd in (
-            f"HORizontal:MAIn:POSition {v}",
-            f"HORizontal:POSition {v}",
-            f"HOR:POSition {v}",
-            f"HORIZONTAL:MAIN:POSITION {v}",
-            f"HORIZONTAL:POSITION {v}",
-            f"HORizontal:MAIn:DELay:POSition {v}",
-            f"HORizontal:DELay:POSition {v}",
-            f"HORIZONTAL:MAIN:DELAY:POSITION {v}",
-            f":HORizontal:MAIn:POSition {v}",
-            f":HORizontal:POSition {v}",
-            f":HOR:POSition {v}",
-            f"HORizontal:MAIn:POSition {val}",
-            f"HORizontal:POSition {val}",
-            f"HOR:POSition {val}",
-        ):
-            try:
-                if self.write(cmd):
-                    return True
-            except Exception:
-                continue
-        return False
+        return (self.write("HORizontal:DELay:MODe ON")
+                and self.write(f"HORizontal:DELay:TIMe {v}"))
 
     def tb_center(self) -> bool:
-        for cmd in (
-            "HORizontal:MAIn:POSition 0",
-            "HORizontal:POSition 0",
-            "HOR:POSition 0",
-            "HORIZONTAL:MAIN:POSITION 0",
-            "HORIZONTAL:POSITION 0",
-            "HORizontal:MAIn:DELay:POSition 0",
-            "HORizontal:DELay:POSition 0",
-            "HORIZONTAL:MAIN:DELAY:POSITION 0",
-            ":HORizontal:MAIn:POSition 0",
-            ":HORizontal:POSition 0",
-            ":HOR:POSition 0",
-            "HORizontal:MAIn:POSition 0.0",
-            "HORizontal:POSition 0.0",
-            "HOR:POSition 0.0",
-        ):
-            try:
-                if self.write(cmd):
-                    return True
-            except Exception:
-                continue
-        return False
+        return self.tb_set_pos("0")
 
     # trigger
     def trig_mode(self) -> str:
@@ -740,13 +680,13 @@ def tek_config_dialog(tek, preview_update=None) -> None:
             try:
                 vs = _val_with_unit_to_sec(vals.get("-TBS-") or "", vals.get("-TBSU-") or "s")
                 vp = _val_with_unit_to_sec(vals.get("-TBP-") or "", vals.get("-TBPU-") or "s")
-                d.tb_set_scale(vs or vals.get("-TBS-") or "")
-                d.tb_set_pos(vp or vals.get("-TBP-") or "")
+                scale_ok = d.tb_set_scale(vs or vals.get("-TBS-") or "")
+                pos_ok = d.tb_set_pos(vp or vals.get("-TBP-") or "")
                 try:
                     _save_scope_cfg({**_load_scope_cfg(), "tb_scale": vals.get("-TBS-") or "", "tb_pos": vals.get("-TBP-") or "", "tb_scale_u": vals.get("-TBSU-") or "ms", "tb_pos_u": vals.get("-TBPU-") or "ms"})
                 except Exception:
                     pass
-                _set_stat("Timebase 已套用")
+                _set_stat("Timebase 已套用" if scale_ok and pos_ok else "Timebase 套用失敗")
             except Exception as e:
                 _set_stat(f"Timebase 套用失敗: {e}")
             continue
